@@ -16,6 +16,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set image name
+        run: echo "IMAGE=ghcr.io/pablosarafan/finbot:latest" >> $GITHUB_ENV
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -28,14 +31,13 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/finbot:latest
+          tags: ${{ env.IMAGE }}
 
       - name: Deploy to CapRover
         run: |
-          IMAGE="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/finbot:latest"
           npm install -g caprover
           caprover deploy \
             --caproverUrl ${{ secrets.CAPROVER_SERVER }} \
             --appToken ${{ secrets.CAPROVER_APP_TOKEN }} \
             --appName ${{ secrets.CAPROVER_APP_NAME }} \
-            --imageName "$IMAGE"
+            --imageName "${{ env.IMAGE }}"
