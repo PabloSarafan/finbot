@@ -89,4 +89,10 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        import traceback
+        print(f"FATAL: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)

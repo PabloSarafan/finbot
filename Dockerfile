@@ -15,4 +15,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "-m", "bot.main"]
+CMD ["sh", "-c", "python -u -m bot.main 2>&1"]
