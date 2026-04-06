@@ -8,18 +8,34 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install CapRover CLI
-        run: npm install -g caprover
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Deploy
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/finbot:latest
+
+      - name: Deploy to CapRover
         run: |
-          tar -czf /tmp/deploy.tar.gz --exclude='.git' --exclude='.venv' --exclude='__pycache__' .
+          IMAGE="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/finbot:latest"
+          npm install -g caprover
           caprover deploy \
             --caproverUrl ${{ secrets.CAPROVER_SERVER }} \
             --appToken ${{ secrets.CAPROVER_APP_TOKEN }} \
             --appName ${{ secrets.CAPROVER_APP_NAME }} \
-            --tarFile /tmp/deploy.tar.gz
+            --imageName "$IMAGE"
