@@ -12,9 +12,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy to CapRover
-        uses: caprover/deploy-from-github@v1.1.2
-        with:
-          server: ${{ secrets.CAPROVER_SERVER }}     # e.g. https://captain.yourdomain.com
-          app: ${{ secrets.CAPROVER_APP_NAME }}      # e.g. finbot
-          token: ${{ secrets.CAPROVER_APP_TOKEN }}   # App token from CapRover dashboard
+      - name: Install CapRover CLI
+        run: npm install -g caprover
+
+      - name: Deploy
+        run: |
+          tar -czf deploy.tar.gz --exclude='.git' --exclude='.venv' --exclude='__pycache__' .
+          caprover deploy \
+            --caproverUrl ${{ secrets.CAPROVER_SERVER }} \
+            --appToken ${{ secrets.CAPROVER_APP_TOKEN }} \
+            --appName ${{ secrets.CAPROVER_APP_NAME }} \
+            --tarFile ./deploy.tar.gz
