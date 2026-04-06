@@ -1,0 +1,20 @@
+name: Deploy to CapRover
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to CapRover
+        uses: caprover/deploy-from-github@v1.1.2
+        with:
+          server: ${{ secrets.CAPROVER_SERVER }}     # e.g. https://captain.yourdomain.com
+          app: ${{ secrets.CAPROVER_APP_NAME }}      # e.g. finbot
+          token: ${{ secrets.CAPROVER_APP_TOKEN }}   # App token from CapRover dashboard

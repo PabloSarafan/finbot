@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "finbot (polling)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "bot.main"],
+      "port": 0
+    },
+    {
+      "name": "postgres (docker)",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "up", "db"],
+      "port": 5432
+    },
+    {
+      "name": "full stack (docker compose)",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "up", "--build"],
+      "port": 0
+    }
+  ]
+}
