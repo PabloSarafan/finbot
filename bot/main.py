@@ -24,13 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot) -> None:
-    logger.info("Bot starting, running migrations...")
-    from alembic.config import Config
-    from alembic import command
-    alembic_cfg = Config("alembic.ini")
-    command.upgrade(alembic_cfg, "head")
-    logger.info("Migrations done")
-
+    logger.info("Bot started")
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать / перезапустить"),
         BotCommand(command="report", description="Отчёт за сегодня"),
@@ -89,6 +83,19 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    try:
+        from alembic.config import Config
+        from alembic import command as alembic_command
+        logger.info("Running migrations...")
+        alembic_cfg = Config("alembic.ini")
+        alembic_command.upgrade(alembic_cfg, "head")
+        logger.info("Migrations done")
+    except Exception as e:
+        import traceback
+        print(f"Migration error: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
+
     try:
         asyncio.run(main())
     except Exception as e:
