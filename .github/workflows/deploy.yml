@@ -17,9 +17,9 @@ jobs:
 
       - name: Deploy
         run: |
-          tar -czf deploy.tar.gz --exclude='.git' --exclude='.venv' --exclude='__pycache__' .
+          tar -czf /tmp/deploy.tar.gz --exclude='.git' --exclude='.venv' --exclude='__pycache__' .
           caprover deploy \
             --caproverUrl ${{ secrets.CAPROVER_SERVER }} \
             --appToken ${{ secrets.CAPROVER_APP_TOKEN }} \
             --appName ${{ secrets.CAPROVER_APP_NAME }} \
-            --tarFile ./deploy.tar.gz
+            --tarFile /tmp/deploy.tar.gz
