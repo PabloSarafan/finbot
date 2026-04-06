@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     # Database
     database_url: str  # postgresql+asyncpg://user:pass@host/db
 
+    @property
+    def async_database_url(self) -> str:
+        """Adds ssl=require for Supabase if not already present."""
+        url = self.database_url
+        if "supabase.co" in url and "ssl=" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}ssl=require"
+        return url
+
     # Admin IDs (comma-separated)
     admin_telegram_ids: str = ""
 

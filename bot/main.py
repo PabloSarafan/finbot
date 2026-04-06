@@ -24,9 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot) -> None:
-    logger.info("Bot started")
-    import subprocess
-    subprocess.run(["alembic", "upgrade", "head"], check=True)
+    logger.info("Bot starting, running migrations...")
+    from alembic.config import Config
+    from alembic import command
+    alembic_cfg = Config("alembic.ini")
+    command.upgrade(alembic_cfg, "head")
+    logger.info("Migrations done")
 
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать / перезапустить"),
