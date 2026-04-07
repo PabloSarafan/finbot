@@ -36,7 +36,6 @@ async def on_startup(bot: Bot) -> None:
         BotCommand(command="start", description="Начать / перезапустить"),
         BotCommand(command="report", description="Отчёт за сегодня"),
         BotCommand(command="month", description="Месячный отчёт"),
-        BotCommand(command="last", description="Последние 5 транзакций"),
         BotCommand(command="goal", description="Изменить финансовую цель"),
         BotCommand(command="stats", description="Статистика (админ)"),
         BotCommand(command="create_invite", description="Создать инвайт (админ)"),
