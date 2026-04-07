@@ -10,8 +10,10 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
     openai_base_url: Optional[str] = None
+    openai_https_proxy: Optional[str] = None
     openai_model_categorize: str = "gpt-4o-mini"
     openai_model_report: str = "gpt-4o"
+    llm_strict_startup_check: bool = True
 
     # Database
     database_url: str  # postgresql+asyncpg://user:pass@host/db
