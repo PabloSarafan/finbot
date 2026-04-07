@@ -25,8 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot) -> None:
-    # Fail-fast check: deployment should fail early if LLM is unreachable/misconfigured.
-    await assert_llm_ready()
+    # Optional fail-fast check: can be disabled for restricted regions.
+    if settings.llm_strict_startup_check:
+        await assert_llm_ready()
+    else:
+        logger.warning("LLM startup check is disabled (LLM_STRICT_STARTUP_CHECK=false)")
     logger.info("Bot started")
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать / перезапустить"),

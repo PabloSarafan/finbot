@@ -3,6 +3,7 @@ import logging
 from decimal import Decimal
 from typing import Optional
 
+import httpx
 from openai import AsyncOpenAI
 
 from config import settings
@@ -12,6 +13,10 @@ logger = logging.getLogger(__name__)
 client_kwargs = {"api_key": settings.openai_api_key}
 if settings.openai_base_url:
     client_kwargs["base_url"] = settings.openai_base_url
+if settings.openai_https_proxy:
+    # Route OpenAI traffic via explicit proxy for restricted regions.
+    client_kwargs["http_client"] = httpx.AsyncClient(proxy=settings.openai_https_proxy)
+    logger.info("OpenAI client initialized with HTTPS proxy")
 client = AsyncOpenAI(**client_kwargs)
 
 CATEGORIES_EXPENSE = [
