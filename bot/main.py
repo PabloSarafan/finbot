@@ -88,12 +88,13 @@ if __name__ == "__main__":
         from alembic import command as alembic_command
         logger.info("Running migrations...")
         alembic_cfg = Config("alembic.ini")
+        alembic_cfg.set_main_option("sqlalchemy.url", "")  # force use of env.py
         alembic_command.upgrade(alembic_cfg, "head")
         logger.info("Migrations done")
     except Exception as e:
         import traceback
-        print(f"Migration error: {e}", flush=True)
-        traceback.print_exc()
+        print(f"Migration error: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc(file=sys.stdout)
         sys.exit(1)
 
     try:
