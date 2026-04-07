@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command, or_f
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import User
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
@@ -29,11 +31,13 @@ class OnboardingStates(StatesGroup):
 @router.message(CommandStart())
 async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) -> None:
     tg_id = message.from_user.id
+    logger.info("Received /start from user_id=%s", tg_id)
 
     result = await session.execute(select(User).where(User.telegram_id == tg_id))
     user = result.scalar_one_or_none()
 
     if user and user.is_active:
+        logger.info("User already active user_id=%s", tg_id)
         await message.answer(
             "✅ Ты уже зарегистрирован!\n\n"
             "Просто напиши трату или доход, например:\n"
@@ -46,6 +50,7 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) 
         return
 
     if user is None:
+        logger.info("Registering new user user_id=%s", tg_id)
         user = User(
             telegram_id=tg_id,
             username=message.from_user.username,
@@ -55,6 +60,7 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) 
         )
         session.add(user)
     else:
+        logger.info("Reactivating existing user user_id=%s", tg_id)
         user.is_active = True
         user.activated_at = datetime.now(timezone.utc)
 
@@ -77,6 +83,7 @@ async def process_goal(message: Message, session: AsyncSession, state: FSMContex
     user = result.scalar_one_or_none()
 
     goal_text = message.text.strip()
+    logger.info("Processing goal input user_id=%s skipped=%s", tg_id, goal_text.lower() == "/skip")
     if goal_text.lower() != "/skip" and user:
         user.goal = goal_text
         await session.commit()

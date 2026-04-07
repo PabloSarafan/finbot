@@ -1,4 +1,5 @@
 import uuid
+import logging
 from decimal import Decimal
 from typing import Optional
 
@@ -19,6 +20,7 @@ from bot.services.currency import convert_to_rub, format_amount
 from bot.handlers.start import MAIN_KEYBOARD
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 CATEGORIES_EXPENSE = [
     "Еда 🛒", "Кафе ☕", "Транспорт 🚗", "ЖКХ 🏠",
@@ -161,13 +163,16 @@ async def handle_transaction(
     message: Message, session: AsyncSession, state: FSMContext, user: User = None
 ) -> None:
     if user is None:
+        logger.warning("Ignoring transaction message from unauthorized user_id=%s", message.from_user.id)
         return
 
     text = message.text.strip()
+    logger.info("Handling transaction message user_id=%s text_len=%s", user.telegram_id, len(text))
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     parsed = await parse_transaction(text)
     if parsed is None:
+        logger.info("Transaction parsing failed user_id=%s", user.telegram_id)
         await message.answer(
             "🤔 Не смог разобрать трату. Попробуй в формате:\n"
             "• `кофе 200 руб`\n"
@@ -191,6 +196,12 @@ async def handle_transaction(
     try:
         amount_rub, exchange_rate = await convert_to_rub(amount_orig, currency)
     except Exception:
+        logger.exception(
+            "Currency conversion failed user_id=%s currency=%s amount=%s",
+            user.telegram_id,
+            currency,
+            amount_orig,
+        )
         await message.answer("⚠️ Не удалось получить курс валюты. Попробуй позже.")
         return
 
@@ -208,6 +219,14 @@ async def handle_transaction(
     )
     session.add(tx)
     await session.commit()
+    logger.info(
+        "Transaction saved user_id=%s tx_id=%s type=%s category=%s amount_rub=%s",
+        user.telegram_id,
+        tx_id,
+        tx_type,
+        category,
+        amount_rub,
+    )
 
     icon = "💸" if tx_type == "expense" else "💰"
     orig_str = format_amount(amount_orig, currency)
