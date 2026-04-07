@@ -1,5 +1,6 @@
 from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
+from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -8,6 +9,7 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str
+    openai_base_url: Optional[str] = None
     openai_model_categorize: str = "gpt-4o-mini"
     openai_model_report: str = "gpt-4o"
 

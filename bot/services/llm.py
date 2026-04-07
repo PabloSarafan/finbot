@@ -1,4 +1,5 @@
 import json
+import logging
 from decimal import Decimal
 from typing import Optional
 
@@ -6,7 +7,12 @@ from openai import AsyncOpenAI
 
 from config import settings
 
-client = AsyncOpenAI(api_key=settings.openai_api_key)
+logger = logging.getLogger(__name__)
+
+client_kwargs = {"api_key": settings.openai_api_key}
+if settings.openai_base_url:
+    client_kwargs["base_url"] = settings.openai_base_url
+client = AsyncOpenAI(**client_kwargs)
 
 CATEGORIES_EXPENSE = [
     "Еда 🛒", "Кафе ☕", "Транспорт 🚗", "ЖКХ 🏠",
@@ -42,17 +48,21 @@ async def parse_transaction(user_message: str) -> Optional[dict]:
     Returns dict with keys: amount, currency, type, category, description
     Returns None if message is not a transaction.
     """
-    response = await client.chat.completions.create(
-        model=settings.openai_model_categorize,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0,
-        max_tokens=150,
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=settings.openai_model_categorize,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0,
+            max_tokens=150,
+        )
+    except Exception:
+        logger.exception("LLM categorize request failed")
+        return None
 
-    content = response.choices[0].message.content.strip()
+    content = (response.choices[0].message.content or "").strip()
     try:
         data = json.loads(content)
         # Validate required fields
@@ -63,8 +73,26 @@ async def parse_transaction(user_message: str) -> Optional[dict]:
             return None
         data["amount"] = Decimal(str(data["amount"]))
         return data
-    except (json.JSONDecodeError, KeyError, ValueError):
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        logger.exception("Failed to parse transaction JSON from model")
         return None
+
+
+async def assert_llm_ready() -> None:
+    """
+    Fail-fast startup check for LLM availability.
+    Raises exception if model/api/base_url configuration is invalid or unavailable.
+    """
+    await client.chat.completions.create(
+        model=settings.openai_model_categorize,
+        messages=[
+            {"role": "system", "content": "Reply with: ok"},
+            {"role": "user", "content": "ping"},
+        ],
+        temperature=0,
+        max_tokens=5,
+    )
+    logger.info("LLM startup check passed for model '%s'", settings.openai_model_categorize)
 
 
 MONTHLY_ADVICE_PROMPT = """
@@ -102,10 +130,18 @@ async def generate_monthly_advice(
         balance=f"{balance:,.0f}",
         categories=categories_str,
     )
-    response = await client.chat.completions.create(
-        model=settings.openai_model_report,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-        max_tokens=400,
-    )
-    return response.choices[0].message.content.strip()
+    try:
+        response = await client.chat.completions.create(
+            model=settings.openai_model_report,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=400,
+        )
+        return (response.choices[0].message.content or "").strip()
+    except Exception:
+        logger.exception("LLM monthly advice request failed")
+        return (
+            "1) Определи недельный лимит на топ-1 категорию расходов.\n"
+            "2) Откладывай минимум 10% каждого дохода в день поступления.\n"
+            "3) Раз в неделю сверяй план с фактом и корректируй лимиты."
+        )

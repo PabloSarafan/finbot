@@ -14,6 +14,7 @@ from db.models import Base
 from bot.handlers import start, admin, transactions, reports
 from bot.middlewares.auth import AuthMiddleware
 from bot.services.scheduler import setup_scheduler
+from bot.services.llm import assert_llm_ready
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot) -> None:
+    # Fail-fast check: deployment should fail early if LLM is unreachable/misconfigured.
+    await assert_llm_ready()
     logger.info("Bot started")
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать / перезапустить"),
