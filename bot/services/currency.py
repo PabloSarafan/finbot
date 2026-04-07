@@ -7,6 +7,7 @@ from config import settings
 
 _cache: dict[str, tuple[float, Decimal]] = {}  # currency -> (timestamp, rate_to_rub)
 CACHE_TTL = 3600  # 1 hour
+_http_client = httpx.AsyncClient(timeout=settings.currency_request_timeout_sec)
 
 
 async def get_rate_to_rub(currency: str) -> Decimal:
@@ -28,13 +29,12 @@ async def get_rate_to_rub(currency: str) -> Decimal:
 
 async def _fetch_rate(currency: str) -> Decimal:
     url = f"https://v6.exchangerate-api.com/v6/{settings.exchangerate_api_key}/pair/{currency}/RUB"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("result") != "success":
-            raise ValueError(f"Exchange rate API error: {data}")
-        return Decimal(str(data["conversion_rate"]))
+    resp = await _http_client.get(url)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("result") != "success":
+        raise ValueError(f"Exchange rate API error: {data}")
+    return Decimal(str(data["conversion_rate"]))
 
 
 async def convert_to_rub(amount: Decimal, currency: str) -> tuple[Decimal, Decimal]:

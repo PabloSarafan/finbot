@@ -1,5 +1,6 @@
 import uuid
 import logging
+import time
 from decimal import Decimal
 from typing import Optional
 
@@ -170,7 +171,10 @@ async def handle_transaction(
     logger.info("Handling transaction message user_id=%s text_len=%s", user.telegram_id, len(text))
     await message.bot.send_chat_action(message.chat.id, "typing")
 
+    t0 = time.perf_counter()
     parsed = await parse_transaction(text)
+    llm_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info("LLM parse duration user_id=%s ms=%s", user.telegram_id, llm_ms)
     if parsed is None:
         logger.info("Transaction parsing failed user_id=%s", user.telegram_id)
         await message.answer(
@@ -194,7 +198,10 @@ async def handle_transaction(
         category = custom_cat
 
     try:
+        t1 = time.perf_counter()
         amount_rub, exchange_rate = await convert_to_rub(amount_orig, currency)
+        fx_ms = int((time.perf_counter() - t1) * 1000)
+        logger.info("FX convert duration user_id=%s ms=%s currency=%s", user.telegram_id, fx_ms, currency)
     except Exception:
         logger.exception(
             "Currency conversion failed user_id=%s currency=%s amount=%s",
@@ -218,14 +225,17 @@ async def handle_transaction(
         description=description,
     )
     session.add(tx)
+    t2 = time.perf_counter()
     await session.commit()
+    db_ms = int((time.perf_counter() - t2) * 1000)
     logger.info(
-        "Transaction saved user_id=%s tx_id=%s type=%s category=%s amount_rub=%s",
+        "Transaction saved user_id=%s tx_id=%s type=%s category=%s amount_rub=%s db_commit_ms=%s",
         user.telegram_id,
         tx_id,
         tx_type,
         category,
         amount_rub,
+        db_ms,
     )
 
     icon = "💸" if tx_type == "expense" else "💰"

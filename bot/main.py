@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -90,13 +91,35 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        from alembic.config import Config
-        from alembic import command as alembic_command
-        logger.info("Running migrations...")
-        alembic_cfg = Config("alembic.ini")
-        alembic_cfg.set_main_option("sqlalchemy.url", "")  # force use of env.py
-        alembic_command.upgrade(alembic_cfg, "head")
-        logger.info("Migrations done")
+        if settings.run_migrations_on_startup:
+            from alembic.config import Config
+            from alembic import command as alembic_command
+
+            alembic_cfg = Config("alembic.ini")
+            alembic_cfg.set_main_option("sqlalchemy.url", "")  # force use of env.py
+
+            attempts = max(1, settings.startup_migration_retries)
+            delay = max(1, settings.startup_migration_retry_delay_sec)
+            migration_ok = False
+
+            for attempt in range(1, attempts + 1):
+                try:
+                    logger.info("Running migrations... attempt=%s/%s", attempt, attempts)
+                    t0 = time.perf_counter()
+                    alembic_command.upgrade(alembic_cfg, "head")
+                    logger.info("Migrations done in %sms", int((time.perf_counter() - t0) * 1000))
+                    migration_ok = True
+                    break
+                except Exception:
+                    logger.exception("Migration attempt failed attempt=%s/%s", attempt, attempts)
+                    if attempt < attempts:
+                        logger.info("Retrying migrations in %ss...", delay)
+                        time.sleep(delay)
+
+            if not migration_ok:
+                raise RuntimeError(f"Migrations failed after {attempts} attempts")
+        else:
+            logger.warning("Skipping migrations on startup (RUN_MIGRATIONS_ON_STARTUP=false)")
     except Exception as e:
         import traceback
         print(f"Migration error: {type(e).__name__}: {e}", flush=True)

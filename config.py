@@ -14,9 +14,14 @@ class Settings(BaseSettings):
     openai_model_categorize: str = "gpt-4o-mini"
     openai_model_report: str = "gpt-4o"
     llm_strict_startup_check: bool = True
+    run_migrations_on_startup: bool = True
 
     # Database
     database_url: str  # postgresql+asyncpg://user:pass@host/db
+    db_connect_timeout_sec: int = 15
+    db_command_timeout_sec: int = 60
+    startup_migration_retries: int = 5
+    startup_migration_retry_delay_sec: int = 5
 
     @property
     def async_database_url(self) -> str:
@@ -35,6 +40,8 @@ class Settings(BaseSettings):
 
     # App settings
     daily_report_hour: int = 21  # UTC hour for daily reports
+    llm_request_timeout_sec: int = 40
+    currency_request_timeout_sec: int = 10
 
     @property
     def admin_ids(self) -> list[int]:

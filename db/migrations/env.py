@@ -7,6 +7,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from config import settings
 from db.models import Base
 
 config = context.config
@@ -48,7 +49,11 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
-        connect_args={"prepared_statement_cache_size": 0},
+        connect_args={
+            "prepared_statement_cache_size": 0,
+            "timeout": settings.db_connect_timeout_sec,
+            "command_timeout": settings.db_command_timeout_sec,
+        },
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

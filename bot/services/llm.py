@@ -13,10 +13,12 @@ logger = logging.getLogger(__name__)
 client_kwargs = {"api_key": settings.openai_api_key}
 if settings.openai_base_url:
     client_kwargs["base_url"] = settings.openai_base_url
+http_client_kwargs = {"timeout": settings.llm_request_timeout_sec}
 if settings.openai_https_proxy:
     # Route OpenAI traffic via explicit proxy for restricted regions.
-    client_kwargs["http_client"] = httpx.AsyncClient(proxy=settings.openai_https_proxy)
+    http_client_kwargs["proxy"] = settings.openai_https_proxy
     logger.info("OpenAI client initialized with HTTPS proxy")
+client_kwargs["http_client"] = httpx.AsyncClient(**http_client_kwargs)
 client = AsyncOpenAI(**client_kwargs)
 
 CATEGORIES_EXPENSE = [
