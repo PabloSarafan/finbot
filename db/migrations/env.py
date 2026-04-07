@@ -19,6 +19,9 @@ target_metadata = Base.metadata
 # Override sqlalchemy.url from environment variable
 database_url = os.getenv("DATABASE_URL", "")
 if database_url:
+    if ("supabase.co" in database_url or "supabase.com" in database_url) and "ssl=" not in database_url:
+        sep = "&" if "?" in database_url else "?"
+        database_url = f"{database_url}{sep}ssl=require"
     config.set_main_option("sqlalchemy.url", database_url)
 
 

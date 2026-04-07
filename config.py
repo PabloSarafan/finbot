@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     def async_database_url(self) -> str:
         """Adds ssl=require for Supabase if not already present."""
         url = self.database_url
-        if "supabase.co" in url and "ssl=" not in url:
+        if ("supabase.co" in url or "supabase.com" in url) and "ssl=" not in url:
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}ssl=require"
         return url
