@@ -5,7 +5,6 @@ from decimal import Decimal
 from typing import Optional
 
 from aiogram import Router, F
-from aiogram.filters import Command, or_f
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -127,35 +126,6 @@ async def process_custom_category(
         f"Правило: «{keyword}» → *{new_category}*",
         parse_mode="Markdown",
         reply_markup=MAIN_KEYBOARD,
-    )
-
-
-@router.message(or_f(Command("last"), F.text == "📋 Последние 5"))
-async def cmd_last(message: Message, session: AsyncSession, user: User = None) -> None:
-    if user is None:
-        return
-
-    result = await session.execute(
-        select(Transaction)
-        .where(Transaction.user_id == user.telegram_id)
-        .order_by(Transaction.created_at.desc())
-        .limit(5)
-    )
-    txs = result.scalars().all()
-
-    if not txs:
-        await message.answer("📭 Транзакций пока нет.")
-        return
-
-    lines = []
-    for tx in txs:
-        icon = "💸" if tx.type == TransactionType.expense else "💰"
-        date_str = tx.created_at.strftime("%d.%m %H:%M")
-        lines.append(f"{icon} {tx.category} — {tx.amount_rub:,.0f} ₽ | {date_str}")
-
-    await message.answer(
-        "📋 *Последние 5 транзакций:*\n\n" + "\n".join(lines),
-        parse_mode="Markdown",
     )
 
 

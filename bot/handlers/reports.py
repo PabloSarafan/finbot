@@ -11,6 +11,20 @@ from bot.services.charts import build_pie_chart, build_waterfall_chart
 from bot.services.llm import generate_monthly_advice
 
 router = Router()
+MONTHS_RU_GENITIVE = {
+    1: "Января",
+    2: "Февраля",
+    3: "Марта",
+    4: "Апреля",
+    5: "Мая",
+    6: "Июня",
+    7: "Июля",
+    8: "Августа",
+    9: "Сентября",
+    10: "Октября",
+    11: "Ноября",
+    12: "Декабря",
+}
 
 
 @router.message(or_f(Command("report"), F.text == "📊 Отчёт за сегодня"))
@@ -40,7 +54,6 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
 
     total_exp = sum(t.amount_rub for t in expenses)
     total_inc = sum(t.amount_rub for t in incomes)
-    balance = total_inc - total_exp
 
     exp_by_cat: dict[str, float] = {}
     for t in expenses:
@@ -59,14 +72,20 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
         for cat, amt in sorted(inc_by_cat.items(), key=lambda x: -x[1])
     )
 
-    sign = "+" if balance >= 0 else ""
-    await message.answer(
-        f"📊 *Отчёт за {today.strftime('%d %B %Y')}*\n\n"
-        f"💸 Расходы: *{total_exp:,.0f} ₽*\n{exp_lines}\n\n"
-        f"💰 Доходы: *{total_inc:,.0f} ₽*\n{inc_lines}\n\n"
-        f"📈 Баланс: *{sign}{balance:,.0f} ₽*",
-        parse_mode="Markdown",
-    )
+    report_date = f"{today.day} {MONTHS_RU_GENITIVE[today.month]}"
+    parts: list[str] = [f"📊 *Отчёт за {report_date}*"]
+    if total_exp > 0:
+        exp_block = f"💸 *Траты за день: {total_exp:,.0f} ₽*"
+        if exp_lines:
+            exp_block += f"\n{exp_lines}"
+        parts.append(exp_block)
+    if total_inc > 0:
+        inc_block = f"💰 *Доходы за день: {total_inc:,.0f} ₽*"
+        if inc_lines:
+            inc_block += f"\n{inc_lines}"
+        parts.append(inc_block)
+
+    await message.answer("\n\n".join(parts), parse_mode="Markdown")
 
 
 @router.message(or_f(Command("month"), F.text == "📅 Месячный отчёт"))
