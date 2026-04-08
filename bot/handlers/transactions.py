@@ -141,12 +141,94 @@ async def handle_transaction(
     logger.info("Handling transaction message user_id=%s text_len=%s", user.telegram_id, len(text))
     await message.bot.send_chat_action(message.chat.id, "typing")
 
-    t0 = time.perf_counter()
-    parsed = await parse_transaction(text)
-    llm_ms = int((time.perf_counter() - t0) * 1000)
-    logger.info("LLM parse duration user_id=%s ms=%s", user.telegram_id, llm_ms)
-    if parsed is None:
-        logger.info("Transaction parsing failed user_id=%s", user.telegram_id)
+    # Support multi-expense input: split by newlines and semicolons.
+    raw_items = [
+        part.strip()
+        for line in text.replace("\r", "\n").split("\n")
+        for part in line.split(";")
+        if part.strip()
+    ]
+    items = raw_items or [text]
+
+    saved = 0
+    failed: list[str] = []
+
+    for item in items:
+        t0 = time.perf_counter()
+        parsed = await parse_transaction(item)
+        llm_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info("LLM parse duration user_id=%s ms=%s item='%s'", user.telegram_id, llm_ms, item)
+        if parsed is None:
+            logger.info("Transaction parsing failed user_id=%s item='%s'", user.telegram_id, item)
+            failed.append(item)
+            continue
+
+        amount_orig = parsed["amount"]
+        currency = parsed["currency"].upper()
+        tx_type = parsed["type"]
+        category = parsed["category"]
+        description = parsed["description"]
+
+        # Apply custom mapping if exists
+        custom_cat = await _custom_category(session, user.telegram_id, description)
+        if custom_cat:
+            category = custom_cat
+
+        try:
+            t1 = time.perf_counter()
+            amount_rub, exchange_rate = await convert_to_rub(amount_orig, currency)
+            fx_ms = int((time.perf_counter() - t1) * 1000)
+            logger.info("FX convert duration user_id=%s ms=%s currency=%s", user.telegram_id, fx_ms, currency)
+        except Exception:
+            logger.exception(
+                "Currency conversion failed user_id=%s currency=%s amount=%s",
+                user.telegram_id,
+                currency,
+                amount_orig,
+            )
+            failed.append(item)
+            continue
+
+        tx_id = uuid.uuid4()
+        tx = Transaction(
+            id=tx_id,
+            user_id=user.telegram_id,
+            type=TransactionType(tx_type),
+            amount_original=amount_orig,
+            currency_original=currency,
+            amount_rub=amount_rub,
+            exchange_rate=exchange_rate,
+            category=category,
+            description=description,
+        )
+        session.add(tx)
+        t2 = time.perf_counter()
+        await session.commit()
+        db_ms = int((time.perf_counter() - t2) * 1000)
+        logger.info(
+            "Transaction saved user_id=%s tx_id=%s type=%s category=%s amount_rub=%s db_commit_ms=%s",
+            user.telegram_id,
+            tx_id,
+            tx_type,
+            category,
+            amount_rub,
+            db_ms,
+        )
+
+        icon = "💸" if tx_type == "expense" else "💰"
+        orig_str = format_amount(amount_orig, currency)
+        conversion_note = f" (~{amount_rub:,.0f} ₽)" if currency != "RUB" else ""
+
+        await message.answer(
+            f"{icon} *{category}*\n"
+            f"{description} — {orig_str}{conversion_note}\n"
+            f"✅ Сохранено",
+            parse_mode="Markdown",
+            reply_markup=_confirm_kb(tx_id),
+        )
+        saved += 1
+
+    if saved == 0:
         await message.answer(
             "🤔 Не смог разобрать трату. Попробуй в формате:\n"
             "• `кофе 200 руб`\n"
@@ -154,71 +236,13 @@ async def handle_transaction(
             "• `такси 50000 сум`",
             parse_mode="Markdown",
         )
-        return
-
-    amount_orig = parsed["amount"]
-    currency = parsed["currency"].upper()
-    tx_type = parsed["type"]
-    category = parsed["category"]
-    description = parsed["description"]
-
-    # Apply custom mapping if exists
-    custom_cat = await _custom_category(session, user.telegram_id, description)
-    if custom_cat:
-        category = custom_cat
-
-    try:
-        t1 = time.perf_counter()
-        amount_rub, exchange_rate = await convert_to_rub(amount_orig, currency)
-        fx_ms = int((time.perf_counter() - t1) * 1000)
-        logger.info("FX convert duration user_id=%s ms=%s currency=%s", user.telegram_id, fx_ms, currency)
-    except Exception:
-        logger.exception(
-            "Currency conversion failed user_id=%s currency=%s amount=%s",
-            user.telegram_id,
-            currency,
-            amount_orig,
+    elif failed:
+        failed_list = "\n".join(f"• {item}" for item in failed)
+        await message.answer(
+            "Следующие строки не удалось разобрать, я их пропустил:\n"
+            f"{failed_list}",
+            parse_mode="Markdown",
         )
-        await message.answer("⚠️ Не удалось получить курс валюты. Попробуй позже.")
-        return
-
-    tx_id = uuid.uuid4()
-    tx = Transaction(
-        id=tx_id,
-        user_id=user.telegram_id,
-        type=TransactionType(tx_type),
-        amount_original=amount_orig,
-        currency_original=currency,
-        amount_rub=amount_rub,
-        exchange_rate=exchange_rate,
-        category=category,
-        description=description,
-    )
-    session.add(tx)
-    t2 = time.perf_counter()
-    await session.commit()
-    db_ms = int((time.perf_counter() - t2) * 1000)
-    logger.info(
-        "Transaction saved user_id=%s tx_id=%s type=%s category=%s amount_rub=%s db_commit_ms=%s",
-        user.telegram_id,
-        tx_id,
-        tx_type,
-        category,
-        amount_rub,
-        db_ms,
-    )
-
-    icon = "💸" if tx_type == "expense" else "💰"
-    orig_str = format_amount(amount_orig, currency)
-    conversion_note = f" (~{amount_rub:,.0f} ₽)" if currency != "RUB" else ""
-
-    await message.answer(
-        f"{icon} *{category}*\n"
-        f"{description} — {orig_str}{conversion_note}\n"
-        f"✅ Сохранено",
-        parse_mode="Markdown",
-        reply_markup=_confirm_kb(tx_id),
-    )
 
 
 # ── Callback: confirm (close keyboard) ───────────────────────────────────────
