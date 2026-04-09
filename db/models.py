@@ -1,11 +1,11 @@
 import uuid
 from datetime import datetime, time
-from typing import Optional
+from typing import Any, Optional
 from decimal import Decimal
 from enum import Enum as PyEnum
 
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, ForeignKey, Numeric,
+    BigInteger, Boolean, DateTime, ForeignKey, JSON, Numeric,
     String, Text, Time, Enum, Integer, func, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -28,6 +28,7 @@ class User(Base):
     username: Mapped[Optional[str]] = mapped_column(String(64))
     full_name: Mapped[Optional[str]] = mapped_column(String(256))
     goal: Mapped[Optional[str]] = mapped_column(Text)
+    custom_categories: Mapped[Optional[list[Any]]] = mapped_column(JSON, nullable=True)
     default_currency: Mapped[str] = mapped_column(String(8), default="RUB")
     daily_report_time: Mapped[time] = mapped_column(Time, default=time(21, 0))
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -56,7 +57,7 @@ class UserCategoryMapping(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"), index=True)
     keyword: Mapped[str] = mapped_column(Text)
-    category: Mapped[str] = mapped_column(String(64))
+    category: Mapped[str] = mapped_column(Text)
 
     __table_args__ = (UniqueConstraint("user_id", "keyword", name="uq_user_keyword"),)
 
@@ -71,7 +72,7 @@ class Transaction(Base):
     currency_original: Mapped[str] = mapped_column(String(8))
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     exchange_rate: Mapped[Decimal] = mapped_column(Numeric(18, 6))
-    category: Mapped[str] = mapped_column(String(64))
+    category: Mapped[str] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
