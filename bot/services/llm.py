@@ -1,7 +1,7 @@
 import json
 import logging
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 from openai import AsyncOpenAI
@@ -28,7 +28,7 @@ CATEGORIES_EXPENSE = [
 ]
 CATEGORIES_INCOME = ["Зарплата 💼", "Фриланс 💻", "Инвестиции 📈", "Прочее доход 💰"]
 
-SYSTEM_PROMPT = f"""
+SYSTEM_PROMPT_DEFAULT = f"""
 Ты — умный финансовый ассистент. Пользователь пишет о трате или доходе.
 Извлеки из сообщения:
 - amount: число (сумма)
@@ -50,16 +50,68 @@ SYSTEM_PROMPT = f"""
 """
 
 
-async def parse_transaction(user_message: str) -> Optional[dict]:
+def _system_prompt_for_user_categories(names: List[str]) -> str:
+    joined = "\n".join(f"  - {c}" for c in names)
+    return f"""
+Ты — умный финансовый ассистент. Пользователь пишет о трате или доходе.
+Извлеки из сообщения:
+- amount: число (сумма)
+- currency: код валюты (RUB, USD, EUR, UZS, KZT, GBP, CNY и т.д.)
+- type: "expense" (расход) или "income" (доход)
+- category: РОВНО одна строка из списка пользователя ниже (скопируй текст без изменений)
+- description: краткое описание (2-4 слова)
+
+Список категорий пользователя (только они, ничего другого):
+{joined}
+
+Правила:
+- Выбери категорию по смыслу (и для расхода, и для дохода — из этого же списка).
+- Если валюта не указана явно — предполагай RUB. "сум" или "сумов" = UZS
+- Верни ТОЛЬКО валидный JSON без markdown
+
+Формат ответа:
+{{"amount": 200.0, "currency": "RUB", "type": "expense", "category": "<одна строка из списка>", "description": "Кофе"}}
+"""
+
+
+def _normalize_category_to_allowed(raw: str, allowed: List[str]) -> str:
+    if not allowed:
+        return raw
+    s = (raw or "").strip()
+    if s in allowed:
+        return s
+    low = s.lower()
+    for a in allowed:
+        if a.lower() == low:
+            return a
+    logger.warning("LLM category %r not in user list; falling back to %r", s, allowed[0])
+    return allowed[0]
+
+
+async def parse_transaction(
+    user_message: str, custom_category_names: Optional[List[str]] = None
+) -> Optional[dict]:
     """
     Returns dict with keys: amount, currency, type, category, description
     Returns None if message is not a transaction.
     """
+    allowed: Optional[List[str]] = None
+    if custom_category_names:
+        allowed = [str(x).strip() for x in custom_category_names if str(x).strip()]
+        if not allowed:
+            allowed = None
+
+    system_prompt = (
+        _system_prompt_for_user_categories(allowed)
+        if allowed
+        else SYSTEM_PROMPT_DEFAULT
+    )
+
     try:
         response = await client.chat.completions.create(
             model=settings.openai_model_categorize,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
             temperature=0,
@@ -79,6 +131,8 @@ async def parse_transaction(user_message: str) -> Optional[dict]:
         if data["type"] not in ("income", "expense"):
             return None
         data["amount"] = Decimal(str(data["amount"]))
+        if allowed:
+            data["category"] = _normalize_category_to_allowed(str(data.get("category", "")), allowed)
         return data
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
         logger.exception("Failed to parse transaction JSON from model")

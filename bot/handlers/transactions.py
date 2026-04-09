@@ -2,9 +2,10 @@ import uuid
 import logging
 import time
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional
 
 from aiogram import Router, F
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -17,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import Transaction, TransactionType, User, UserCategoryMapping
 from bot.services.llm import parse_transaction
 from bot.services.currency import convert_to_rub, format_amount
-from bot.handlers.start import MAIN_KEYBOARD
+from bot.handlers.start import MAIN_KEYBOARD, OnboardingStates
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -28,7 +29,14 @@ CATEGORIES_EXPENSE = [
     "Техника 💻", "Образование 📚", "Путешествия ✈️", "Прочее 📦",
 ]
 CATEGORIES_INCOME = ["Зарплата 💼", "Фриланс 💻", "Инвестиции 📈", "Прочее доход 💰"]
-ALL_CATEGORIES = CATEGORIES_EXPENSE + CATEGORIES_INCOME
+
+
+def _category_pool_for_user(user: Optional[User], tx_type: str) -> List[str]:
+    if user and user.custom_categories:
+        pool = [str(x).strip() for x in user.custom_categories if str(x).strip()]
+        if pool:
+            return pool
+    return CATEGORIES_EXPENSE if tx_type == "expense" else CATEGORIES_INCOME
 
 
 class CategoryEditState(StatesGroup):
@@ -51,15 +59,16 @@ def _confirm_kb(tx_id: uuid.UUID) -> InlineKeyboardMarkup:
     ]])
 
 
-def _categories_kb(tx_id: uuid.UUID, tx_type: str) -> InlineKeyboardMarkup:
+def _categories_kb(tx_id: uuid.UUID, pool: List[str]) -> InlineKeyboardMarkup:
     c = _compact(tx_id)
-    cats = CATEGORIES_EXPENSE if tx_type == "expense" else CATEGORIES_INCOME
     rows = []
-    for i in range(0, len(cats), 2):
+    for i in range(0, len(pool), 2):
         row = []
-        for cat in cats[i:i + 2]:
-            idx = ALL_CATEGORIES.index(cat)
-            row.append(InlineKeyboardButton(text=cat, callback_data=f"cat:{idx}:{c}"))
+        for j in range(i, min(i + 2, len(pool))):
+            label = pool[j]
+            if len(label) > 40:
+                label = label[:37] + "..."
+            row.append(InlineKeyboardButton(text=label, callback_data=f"cat:{j}:{c}"))
         rows.append(row)
     rows.append([InlineKeyboardButton(text="➕ Своя категория", callback_data=f"cat:cu:{c}")])
     rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"cat:ok:{c}")])
@@ -129,7 +138,11 @@ async def process_custom_category(
     )
 
 
-@router.message(F.text & ~F.text.startswith("/"))
+@router.message(
+    F.text & ~F.text.startswith("/"),
+    ~StateFilter(OnboardingStates.waiting_for_goal),
+    ~StateFilter(OnboardingStates.waiting_for_custom_categories),
+)
 async def handle_transaction(
     message: Message, session: AsyncSession, state: FSMContext, user: User = None
 ) -> None:
@@ -141,12 +154,102 @@ async def handle_transaction(
     logger.info("Handling transaction message user_id=%s text_len=%s", user.telegram_id, len(text))
     await message.bot.send_chat_action(message.chat.id, "typing")
 
-    t0 = time.perf_counter()
-    parsed = await parse_transaction(text)
-    llm_ms = int((time.perf_counter() - t0) * 1000)
-    logger.info("LLM parse duration user_id=%s ms=%s", user.telegram_id, llm_ms)
-    if parsed is None:
-        logger.info("Transaction parsing failed user_id=%s", user.telegram_id)
+    # Support multi-expense input: split by newlines and semicolons.
+    raw_items = [
+        part.strip()
+        for line in text.replace("\r", "\n").split("\n")
+        for part in line.split(";")
+        if part.strip()
+    ]
+    items = raw_items or [text]
+
+    custom_for_llm: Optional[List[str]] = None
+    if user.custom_categories:
+        custom_for_llm = [
+            str(x).strip() for x in user.custom_categories if str(x).strip()
+        ]
+        if not custom_for_llm:
+            custom_for_llm = None
+
+    saved = 0
+    failed: list[str] = []
+
+    for item in items:
+        t0 = time.perf_counter()
+        parsed = await parse_transaction(item, custom_for_llm)
+        llm_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info("LLM parse duration user_id=%s ms=%s item='%s'", user.telegram_id, llm_ms, item)
+        if parsed is None:
+            logger.info("Transaction parsing failed user_id=%s item='%s'", user.telegram_id, item)
+            failed.append(item)
+            continue
+
+        amount_orig = parsed["amount"]
+        currency = parsed["currency"].upper()
+        tx_type = parsed["type"]
+        category = parsed["category"]
+        description = parsed["description"]
+
+        # Apply custom mapping if exists
+        custom_cat = await _custom_category(session, user.telegram_id, description)
+        if custom_cat:
+            category = custom_cat
+
+        try:
+            t1 = time.perf_counter()
+            amount_rub, exchange_rate = await convert_to_rub(amount_orig, currency)
+            fx_ms = int((time.perf_counter() - t1) * 1000)
+            logger.info("FX convert duration user_id=%s ms=%s currency=%s", user.telegram_id, fx_ms, currency)
+        except Exception:
+            logger.exception(
+                "Currency conversion failed user_id=%s currency=%s amount=%s",
+                user.telegram_id,
+                currency,
+                amount_orig,
+            )
+            failed.append(item)
+            continue
+
+        tx_id = uuid.uuid4()
+        tx = Transaction(
+            id=tx_id,
+            user_id=user.telegram_id,
+            type=TransactionType(tx_type),
+            amount_original=amount_orig,
+            currency_original=currency,
+            amount_rub=amount_rub,
+            exchange_rate=exchange_rate,
+            category=category,
+            description=description,
+        )
+        session.add(tx)
+        t2 = time.perf_counter()
+        await session.commit()
+        db_ms = int((time.perf_counter() - t2) * 1000)
+        logger.info(
+            "Transaction saved user_id=%s tx_id=%s type=%s category=%s amount_rub=%s db_commit_ms=%s",
+            user.telegram_id,
+            tx_id,
+            tx_type,
+            category,
+            amount_rub,
+            db_ms,
+        )
+
+        icon = "💸" if tx_type == "expense" else "💰"
+        orig_str = format_amount(amount_orig, currency)
+        conversion_note = f" (~{amount_rub:,.0f} ₽)" if currency != "RUB" else ""
+
+        await message.answer(
+            f"{icon} *{category}*\n"
+            f"{description} — {orig_str}{conversion_note}\n"
+            f"✅ Сохранено",
+            parse_mode="Markdown",
+            reply_markup=_confirm_kb(tx_id),
+        )
+        saved += 1
+
+    if saved == 0:
         await message.answer(
             "🤔 Не смог разобрать трату. Попробуй в формате:\n"
             "• `кофе 200 руб`\n"
@@ -154,71 +257,13 @@ async def handle_transaction(
             "• `такси 50000 сум`",
             parse_mode="Markdown",
         )
-        return
-
-    amount_orig = parsed["amount"]
-    currency = parsed["currency"].upper()
-    tx_type = parsed["type"]
-    category = parsed["category"]
-    description = parsed["description"]
-
-    # Apply custom mapping if exists
-    custom_cat = await _custom_category(session, user.telegram_id, description)
-    if custom_cat:
-        category = custom_cat
-
-    try:
-        t1 = time.perf_counter()
-        amount_rub, exchange_rate = await convert_to_rub(amount_orig, currency)
-        fx_ms = int((time.perf_counter() - t1) * 1000)
-        logger.info("FX convert duration user_id=%s ms=%s currency=%s", user.telegram_id, fx_ms, currency)
-    except Exception:
-        logger.exception(
-            "Currency conversion failed user_id=%s currency=%s amount=%s",
-            user.telegram_id,
-            currency,
-            amount_orig,
+    elif failed:
+        failed_list = "\n".join(f"• {item}" for item in failed)
+        await message.answer(
+            "Следующие строки не удалось разобрать, я их пропустил:\n"
+            f"{failed_list}",
+            parse_mode="Markdown",
         )
-        await message.answer("⚠️ Не удалось получить курс валюты. Попробуй позже.")
-        return
-
-    tx_id = uuid.uuid4()
-    tx = Transaction(
-        id=tx_id,
-        user_id=user.telegram_id,
-        type=TransactionType(tx_type),
-        amount_original=amount_orig,
-        currency_original=currency,
-        amount_rub=amount_rub,
-        exchange_rate=exchange_rate,
-        category=category,
-        description=description,
-    )
-    session.add(tx)
-    t2 = time.perf_counter()
-    await session.commit()
-    db_ms = int((time.perf_counter() - t2) * 1000)
-    logger.info(
-        "Transaction saved user_id=%s tx_id=%s type=%s category=%s amount_rub=%s db_commit_ms=%s",
-        user.telegram_id,
-        tx_id,
-        tx_type,
-        category,
-        amount_rub,
-        db_ms,
-    )
-
-    icon = "💸" if tx_type == "expense" else "💰"
-    orig_str = format_amount(amount_orig, currency)
-    conversion_note = f" (~{amount_rub:,.0f} ₽)" if currency != "RUB" else ""
-
-    await message.answer(
-        f"{icon} *{category}*\n"
-        f"{description} — {orig_str}{conversion_note}\n"
-        f"✅ Сохранено",
-        parse_mode="Markdown",
-        reply_markup=_confirm_kb(tx_id),
-    )
 
 
 # ── Callback: confirm (close keyboard) ───────────────────────────────────────
@@ -242,8 +287,12 @@ async def cb_change(callback: CallbackQuery, session: AsyncSession) -> None:
         await callback.answer("Транзакция не найдена.")
         return
 
+    result_u = await session.execute(select(User).where(User.telegram_id == tx.user_id))
+    u = result_u.scalar_one_or_none()
+    pool = _category_pool_for_user(u, tx.type.value)
+
     await callback.message.edit_reply_markup(
-        reply_markup=_categories_kb(tx_id, tx.type.value)
+        reply_markup=_categories_kb(tx_id, pool)
     )
     await callback.answer()
 
@@ -258,13 +307,20 @@ async def cb_set_category(
     idx = int(parts[1])
     cid = parts[2]
     tx_id = _expand(cid)
-    new_category = ALL_CATEGORIES[idx]
 
     result = await session.execute(select(Transaction).where(Transaction.id == tx_id))
     tx = result.scalar_one_or_none()
     if tx is None:
         await callback.answer("Транзакция не найдена.")
         return
+
+    result_u = await session.execute(select(User).where(User.telegram_id == tx.user_id))
+    u = result_u.scalar_one_or_none()
+    pool = _category_pool_for_user(u, tx.type.value)
+    if idx < 0 or idx >= len(pool):
+        await callback.answer("Неверная категория.")
+        return
+    new_category = pool[idx]
 
     old_category = tx.category
     tx.category = new_category
