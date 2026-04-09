@@ -6,7 +6,37 @@ on:
       - main
 
 jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run database migrations
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "PROD_DATABASE_URL secret is not set"
+            exit 1
+          fi
+          alembic upgrade head
+
   deploy:
+    needs: migrate
     runs-on: ubuntu-latest
     permissions:
       contents: read
