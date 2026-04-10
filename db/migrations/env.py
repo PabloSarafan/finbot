@@ -7,7 +7,6 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from config import settings
 from db.models import Base
 
 config = context.config
@@ -16,6 +15,16 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 # Override sqlalchemy.url from environment variable
 database_url = os.getenv("DATABASE_URL", "")
@@ -45,14 +54,16 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
+    db_connect_timeout_sec = _env_int("DB_CONNECT_TIMEOUT_SEC", 15)
+    db_command_timeout_sec = _env_int("DB_COMMAND_TIMEOUT_SEC", 60)
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
         connect_args={
             "prepared_statement_cache_size": 0,
-            "timeout": settings.db_connect_timeout_sec,
-            "command_timeout": settings.db_command_timeout_sec,
+            "timeout": db_connect_timeout_sec,
+            "command_timeout": db_command_timeout_sec,
         },
     )
     async with connectable.connect() as connection:
