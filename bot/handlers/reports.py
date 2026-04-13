@@ -1,12 +1,16 @@
 from datetime import date, datetime, timezone
+from decimal import Decimal
+import re
 
 from aiogram import Router, F
 from aiogram.filters import Command, or_f
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, BufferedInputFile
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Transaction, TransactionType, User
+from db.models import Transaction, TransactionType, User, UserCategoryLimit
 from bot.services.charts import build_pie_chart, build_waterfall_chart
 from bot.services.llm import generate_monthly_advice
 
@@ -27,6 +31,46 @@ MONTHS_RU_GENITIVE = {
 }
 
 
+class LimitsStates(StatesGroup):
+    waiting_for_limits = State()
+
+
+def _month_start(today: date) -> datetime:
+    return datetime(today.year, today.month, 1, tzinfo=timezone.utc)
+
+
+def _next_month_start(today: date) -> datetime:
+    if today.month == 12:
+        return datetime(today.year + 1, 1, 1, tzinfo=timezone.utc)
+    return datetime(today.year, today.month + 1, 1, tzinfo=timezone.utc)
+
+
+def _parse_limit_lines(text: str) -> list[tuple[str, Decimal]]:
+    # Supports "Категория 10000", "Категория: 10000", "Категория - 10000"
+    rows: list[tuple[str, Decimal]] = []
+    for raw in text.replace("\r", "\n").split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^\s*(.+?)\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)\s*$", line)
+        if not m:
+            continue
+        category = m.group(1).strip()
+        value = Decimal(m.group(2).replace(",", "."))
+        if value < 0:
+            continue
+        rows.append((category, value))
+    return rows
+
+
+async def _read_limits_map(session: AsyncSession, user_id: int) -> dict[str, Decimal]:
+    result = await session.execute(
+        select(UserCategoryLimit).where(UserCategoryLimit.user_id == user_id)
+    )
+    limits = result.scalars().all()
+    return {x.category: x.monthly_limit_rub for x in limits}
+
+
 @router.message(or_f(Command("report"), F.text == "📊 Отчёт за сегодня"))
 async def cmd_report(message: Message, session: AsyncSession, user: User = None) -> None:
     if user is None:
@@ -34,6 +78,7 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
 
     today = date.today()
     start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+    month_start = _month_start(today)
 
     result = await session.execute(
         select(Transaction).where(
@@ -44,10 +89,6 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
         )
     )
     txs = result.scalars().all()
-
-    if not txs:
-        await message.answer("📭 Сегодня транзакций нет.")
-        return
 
     expenses = [t for t in txs if t.type == TransactionType.expense]
     incomes = [t for t in txs if t.type == TransactionType.income]
@@ -74,6 +115,8 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
 
     report_date = f"{today.day} {MONTHS_RU_GENITIVE[today.month]}"
     parts: list[str] = [f"📊 *Отчёт за {report_date}*"]
+    if not txs:
+        parts.append("📭 Сегодня транзакций нет.")
     if total_exp > 0:
         exp_block = f"💸 *Траты за день: {total_exp:,.0f} ₽*"
         if exp_lines:
@@ -85,6 +128,27 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
             inc_block += f"\n{inc_lines}"
         parts.append(inc_block)
 
+    # Month-to-date expenses vs configured monthly budget
+    mtd_result = await session.execute(
+        select(Transaction).where(
+            and_(
+                Transaction.user_id == user.telegram_id,
+                Transaction.created_at >= month_start,
+                Transaction.type == TransactionType.expense,
+            )
+        )
+    )
+    mtd_expenses = mtd_result.scalars().all()
+    mtd_total = sum(t.amount_rub for t in mtd_expenses)
+    limits_map = await _read_limits_map(session, user.telegram_id)
+    plan_total = sum(limits_map.values()) if limits_map else Decimal("0")
+    if plan_total > 0:
+        pct = (mtd_total / plan_total * Decimal("100"))
+        parts.append(
+            f"📅 *Траты за месяц (на сегодня):* {mtd_total:,.0f} ₽ / {plan_total:,.0f} ₽ "
+            f"({pct:,.0f}%)"
+        )
+
     await message.answer("\n\n".join(parts), parse_mode="Markdown")
 
 
@@ -94,11 +158,8 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
         return
 
     today = date.today()
-    start = datetime(today.year, today.month, 1, tzinfo=timezone.utc)
-    if today.month == 12:
-        end = datetime(today.year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        end = datetime(today.year, today.month + 1, 1, tzinfo=timezone.utc)
+    start = _month_start(today)
+    end = _next_month_start(today)
 
     result = await session.execute(
         select(Transaction).where(
@@ -124,7 +185,6 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
     total_inc = sum(t.amount_rub for t in incomes)
     balance = total_inc - total_exp
 
-    from decimal import Decimal
     by_cat: dict[str, Decimal] = {}
     for t in expenses:
         by_cat[t.category] = by_cat.get(t.category, Decimal("0")) + t.amount_rub
@@ -156,11 +216,89 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
         )
 
     sign = "+" if balance >= 0 else ""
+    limits_map = await _read_limits_map(session, user.telegram_id)
+    plan_lines: list[str] = []
+    if limits_map:
+        for cat, spent in sorted(by_cat.items(), key=lambda x: -x[1]):
+            plan = limits_map.get(cat, Decimal("0"))
+            if plan > 0:
+                pct = (spent / plan * Decimal("100"))
+                plan_lines.append(f"  • {cat}: {spent:,.0f} ₽ / {plan:,.0f} ₽ ({pct:,.0f}%)")
+            else:
+                plan_lines.append(f"  • {cat}: {spent:,.0f} ₽ / —")
+
+    limits_block = ""
+    if plan_lines:
+        limits_block = "\n\n📌 *По категориям (факт vs план):*\n" + "\n".join(plan_lines[:12])
+
     await message.answer(
         f"📅 *{month_label}*\n\n"
         f"💰 Доходы: *{total_inc:,.0f} ₽*\n"
         f"💸 Расходы: *{total_exp:,.0f} ₽*\n"
         f"📊 Баланс: *{sign}{balance:,.0f} ₽*\n\n"
-        f"🎯 *Советы по финансам:*\n{advice}",
+        f"🎯 *Советы по финансам:*\n{advice}"
+        f"{limits_block}",
         parse_mode="Markdown",
     )
+
+
+@router.message(or_f(Command("limits"), F.text == "📌 Лимиты"))
+async def cmd_limits(message: Message, session: AsyncSession, state: FSMContext, user: User = None) -> None:
+    if user is None:
+        return
+    limits_map = await _read_limits_map(session, user.telegram_id)
+    lines = [
+        "📌 *Лимиты по категориям (в месяц)*",
+        "",
+        "Формат ввода: `Категория 15000` (каждую категорию с новой строки).",
+        "Пример:",
+        "`Еда 30000`",
+        "`Кафе 15000`",
+        "",
+        "Отправь `/skip`, чтобы очистить все лимиты.",
+    ]
+    if limits_map:
+        lines.extend(["", "Текущие лимиты:"])
+        for cat, val in sorted(limits_map.items(), key=lambda x: x[0].lower()):
+            lines.append(f"• {cat} — {val:,.0f} ₽")
+    await state.set_state(LimitsStates.waiting_for_limits)
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(LimitsStates.waiting_for_limits)
+async def process_limits(message: Message, session: AsyncSession, state: FSMContext, user: User = None) -> None:
+    if user is None:
+        await state.clear()
+        return
+    text = message.text.strip()
+    if text.lower() == "/skip":
+        await session.execute(
+            delete(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
+        )
+        await session.commit()
+        await state.clear()
+        await message.answer("✅ Все лимиты удалены.")
+        return
+
+    parsed = _parse_limit_lines(text)
+    if not parsed:
+        await message.answer(
+            "Не смог разобрать лимиты. Используй формат:\n`Еда 30000`\n`Кафе 15000`",
+            parse_mode="Markdown",
+        )
+        return
+
+    await session.execute(
+        delete(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
+    )
+    for cat, val in parsed:
+        session.add(
+            UserCategoryLimit(
+                user_id=user.telegram_id,
+                category=cat,
+                monthly_limit_rub=val,
+            )
+        )
+    await session.commit()
+    await state.clear()
+    await message.answer(f"✅ Сохранил лимиты: {len(parsed)} категорий.")
