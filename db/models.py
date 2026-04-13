@@ -38,6 +38,7 @@ class User(Base):
     )
 
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="user")
+    category_limits: Mapped[list["UserCategoryLimit"]] = relationship(back_populates="user")
 
 
 class InviteCode(Base):
@@ -79,3 +80,22 @@ class Transaction(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="transactions")
+
+
+class UserCategoryLimit(Base):
+    __tablename__ = "user_category_limits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"), index=True)
+    category: Mapped[str] = mapped_column(Text)
+    monthly_limit_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="category_limits")
+
+    __table_args__ = (UniqueConstraint("user_id", "category", name="uq_user_category_limit"),)
