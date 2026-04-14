@@ -36,6 +36,7 @@ async def on_startup(bot: Bot) -> None:
         BotCommand(command="start", description="Начать / перезапустить"),
         BotCommand(command="report", description="Отчёт за сегодня"),
         BotCommand(command="month", description="Месячный отчёт"),
+        BotCommand(command="stash", description="Копилка / цель накоплений"),
         BotCommand(command="limits", description="Лимиты по категориям"),
         BotCommand(command="goal", description="Изменить финансовую цель"),
         BotCommand(command="stats", description="Статистика (админ)"),
