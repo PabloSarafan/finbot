@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Отчёт за сегодня"), KeyboardButton(text="📅 Месячный отчёт")],
-        [KeyboardButton(text="📌 Лимиты"), KeyboardButton(text="🎯 Изменить цель")],
+        [KeyboardButton(text="🏦 Копилка"), KeyboardButton(text="📌 Лимиты")],
+        [KeyboardButton(text="🎯 Изменить цель")],
     ],
     resize_keyboard=True,
     input_field_placeholder="Напиши трату или доход...",

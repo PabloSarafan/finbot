@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import re
+from typing import Optional
 
 from aiogram import Router, F
 from aiogram.filters import Command, or_f
@@ -33,6 +34,13 @@ MONTHS_RU_GENITIVE = {
 
 class LimitsStates(StatesGroup):
     waiting_for_limits = State()
+
+
+class SavingsStates(StatesGroup):
+    waiting_for_goal = State()
+
+
+SAVINGS_CATEGORY = "Копилка 🏦"
 
 
 def _month_start(today: date) -> datetime:
@@ -69,6 +77,56 @@ async def _read_limits_map(session: AsyncSession, user_id: int) -> dict[str, Dec
     )
     limits = result.scalars().all()
     return {x.category: x.monthly_limit_rub for x in limits}
+
+
+def _parse_savings_goal(text: str) -> Optional[tuple[str, Decimal]]:
+    raw = text.strip()
+    if not raw:
+        return None
+    # "<name>; <amount>" or just "<amount>"
+    if ";" in raw:
+        name, amount_part = raw.split(";", 1)
+        name = name.strip() or "Копилка"
+        amount_part = amount_part.strip()
+    else:
+        name = "Копилка"
+        amount_part = raw
+    m = re.match(r"^\s*([0-9]+(?:[.,][0-9]+)?)\s*$", amount_part)
+    if not m:
+        return None
+    val = Decimal(m.group(1).replace(",", "."))
+    if val <= 0:
+        return None
+    return name, val
+
+
+async def _read_savings_stats(
+    session: AsyncSession, user_id: int, month_start: datetime
+) -> tuple[Decimal, Decimal]:
+    all_time_result = await session.execute(
+        select(Transaction).where(
+            and_(
+                Transaction.user_id == user_id,
+                Transaction.type == TransactionType.income,
+                Transaction.category == SAVINGS_CATEGORY,
+            )
+        )
+    )
+    all_time = all_time_result.scalars().all()
+    total_saved = sum(t.amount_rub for t in all_time)
+
+    month_result = await session.execute(
+        select(Transaction).where(
+            and_(
+                Transaction.user_id == user_id,
+                Transaction.type == TransactionType.income,
+                Transaction.category == SAVINGS_CATEGORY,
+                Transaction.created_at >= month_start,
+            )
+        )
+    )
+    month_saved = sum(t.amount_rub for t in month_result.scalars().all())
+    return total_saved, month_saved
 
 
 @router.message(or_f(Command("report"), F.text == "📊 Отчёт за сегодня"))
@@ -148,6 +206,17 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
             f"📅 *Траты за месяц (на сегодня):* {mtd_total:,.0f} ₽ / {plan_total:,.0f} ₽ "
             f"({pct:,.0f}%)"
         )
+
+    total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, month_start)
+    if total_saved > 0 or user.savings_goal_amount_rub:
+        savings_line = f"🏦 *Копилка:* {total_saved:,.0f} ₽"
+        if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
+            progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
+            savings_line += (
+                f" / {user.savings_goal_amount_rub:,.0f} ₽ ({progress:,.0f}%)"
+                f"\n📈 За месяц в копилку: {month_saved:,.0f} ₽"
+            )
+        parts.append(savings_line)
 
     await message.answer("\n\n".join(parts), parse_mode="Markdown")
 
@@ -231,15 +300,93 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
     if plan_lines:
         limits_block = "\n\n📌 *По категориям (факт vs план):*\n" + "\n".join(plan_lines[:12])
 
+    total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, start)
+    savings_block = ""
+    if total_saved > 0 or user.savings_goal_amount_rub:
+        goal_name = user.savings_goal_name or "Копилка"
+        savings_block = (
+            f"\n\n🏦 *{goal_name}:* {total_saved:,.0f} ₽"
+            f"\n📈 За месяц в копилку: {month_saved:,.0f} ₽"
+        )
+        if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
+            remaining = max(Decimal("0"), user.savings_goal_amount_rub - total_saved)
+            progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
+            tip = (
+                "Отличный темп, продолжай!" if remaining == 0 else
+                f"Осталось {remaining:,.0f} ₽. Попробуй увеличить ежемесячный вклад в копилку."
+            )
+            savings_block += (
+                f"\n🎯 Цель: {user.savings_goal_amount_rub:,.0f} ₽ ({progress:,.0f}%)"
+                f"\n💡 {tip}"
+            )
+
     await message.answer(
         f"📅 *{month_label}*\n\n"
         f"💰 Доходы: *{total_inc:,.0f} ₽*\n"
         f"💸 Расходы: *{total_exp:,.0f} ₽*\n"
         f"📊 Баланс: *{sign}{balance:,.0f} ₽*\n\n"
         f"🎯 *Советы по финансам:*\n{advice}"
-        f"{limits_block}",
+        f"{limits_block}"
+        f"{savings_block}",
         parse_mode="Markdown",
     )
+
+
+@router.message(or_f(Command("stash"), F.text == "🏦 Копилка"))
+async def cmd_stash(message: Message, session: AsyncSession, state: FSMContext, user: User = None) -> None:
+    if user is None:
+        return
+    month_start = _month_start(date.today())
+    total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, month_start)
+
+    lines = [
+        "🏦 *Копилка*",
+        f"Накоплено всего: *{total_saved:,.0f} ₽*",
+        f"За текущий месяц: *{month_saved:,.0f} ₽*",
+    ]
+    if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
+        progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
+        lines.extend([
+            f"Цель: *{user.savings_goal_amount_rub:,.0f} ₽* ({progress:,.0f}%)",
+            f"Название цели: *{user.savings_goal_name or 'Копилка'}*",
+        ])
+    lines.extend([
+        "",
+        "Чтобы установить/обновить цель, отправь:",
+        "`Название цели; 500000` или просто `500000`",
+        "Отправь `/skip`, чтобы убрать цель.",
+    ])
+    await state.set_state(SavingsStates.waiting_for_goal)
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(SavingsStates.waiting_for_goal)
+async def process_stash_goal(message: Message, session: AsyncSession, state: FSMContext, user: User = None) -> None:
+    if user is None:
+        await state.clear()
+        return
+    text = message.text.strip()
+    if text.lower() == "/skip":
+        user.savings_goal_name = None
+        user.savings_goal_amount_rub = None
+        await session.commit()
+        await state.clear()
+        await message.answer("✅ Цель копилки очищена.")
+        return
+
+    parsed = _parse_savings_goal(text)
+    if not parsed:
+        await message.answer(
+            "Не смог разобрать цель. Используй формат:\n`Квартира; 500000`\nили `500000`",
+            parse_mode="Markdown",
+        )
+        return
+    name, amount = parsed
+    user.savings_goal_name = name
+    user.savings_goal_amount_rub = amount
+    await session.commit()
+    await state.clear()
+    await message.answer(f"✅ Цель копилки сохранена: *{name}* — *{amount:,.0f} ₽*", parse_mode="Markdown")
 
 
 @router.message(or_f(Command("limits"), F.text == "📌 Лимиты"))

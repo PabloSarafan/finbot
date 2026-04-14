@@ -29,14 +29,17 @@ CATEGORIES_EXPENSE = [
     "Техника 💻", "Образование 📚", "Путешествия ✈️", "Прочее 📦",
 ]
 CATEGORIES_INCOME = ["Зарплата 💼", "Фриланс 💻", "Инвестиции 📈", "Прочее доход 💰"]
+SAVINGS_CATEGORY = "Копилка 🏦"
 
 
 def _category_pool_for_user(user: Optional[User], tx_type: str) -> List[str]:
     if user and user.custom_categories:
         pool = [str(x).strip() for x in user.custom_categories if str(x).strip()]
         if pool:
+            if tx_type == "income" and SAVINGS_CATEGORY not in pool:
+                return pool + [SAVINGS_CATEGORY]
             return pool
-    return CATEGORIES_EXPENSE if tx_type == "expense" else CATEGORIES_INCOME
+    return CATEGORIES_EXPENSE if tx_type == "expense" else (CATEGORIES_INCOME + [SAVINGS_CATEGORY])
 
 
 class CategoryEditState(StatesGroup):
@@ -168,6 +171,8 @@ async def handle_transaction(
         custom_for_llm = [
             str(x).strip() for x in user.custom_categories if str(x).strip()
         ]
+        if SAVINGS_CATEGORY not in custom_for_llm:
+            custom_for_llm.append(SAVINGS_CATEGORY)
         if not custom_for_llm:
             custom_for_llm = None
 

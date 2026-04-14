@@ -28,6 +28,8 @@ class User(Base):
     username: Mapped[Optional[str]] = mapped_column(String(64))
     full_name: Mapped[Optional[str]] = mapped_column(String(256))
     goal: Mapped[Optional[str]] = mapped_column(Text)
+    savings_goal_name: Mapped[Optional[str]] = mapped_column(Text)
+    savings_goal_amount_rub: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
     custom_categories: Mapped[Optional[list[Any]]] = mapped_column(JSON, nullable=True)
     default_currency: Mapped[str] = mapped_column(String(8), default="RUB")
     daily_report_time: Mapped[time] = mapped_column(Time, default=time(21, 0))
