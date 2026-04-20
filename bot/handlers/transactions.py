@@ -143,8 +143,7 @@ async def process_custom_category(
 
 @router.message(
     F.text & ~F.text.startswith("/"),
-    ~StateFilter(OnboardingStates.waiting_for_goal),
-    ~StateFilter(OnboardingStates.waiting_for_custom_categories),
+    StateFilter(None),
 )
 async def handle_transaction(
     message: Message, session: AsyncSession, state: FSMContext, user: User = None
