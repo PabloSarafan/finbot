@@ -34,6 +34,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 
 
 class OnboardingStates(StatesGroup):
+    waiting_for_currency = State()
+    waiting_for_custom_currency = State()
     waiting_for_goal = State()
     waiting_for_custom_categories = State()
 
@@ -76,6 +78,26 @@ def _onboarding_categories_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _onboarding_currency_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Рубль (RUB)", callback_data="onb:cur:RUB"),
+                InlineKeyboardButton(text="Доллар (USD)", callback_data="onb:cur:USD"),
+            ],
+            [InlineKeyboardButton(text="Своя валюта", callback_data="onb:cur:CUSTOM")],
+        ]
+    )
+
+
+def _onboarding_goal_skip_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Пропустить цель", callback_data="onb:goal_skip")]
+        ]
+    )
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) -> None:
     tg_id = message.from_user.id
@@ -114,15 +136,86 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) 
 
     await session.commit()
 
-    await state.set_state(OnboardingStates.waiting_for_goal)
-    await state.update_data(onboarding_categories_step=True)
     await message.answer(
         "🎉 Добро пожаловать!\n\n"
-        "Для персонализированных советов расскажи о своей финансовой цели.\n"
-        "Например: *«Накопить на квартиру за 2 года»* или *«Снизить расходы на 20%»*\n\n"
-        "Напиши свою цель (или /skip чтобы пропустить):",
+        "Привет! Я *Бобби* — твой помощник по личным финансам.\n"
+        "Помогу вести учёт расходов и доходов и достигать финансовых целей.\n\n"
+        "Жми Старт и погнали 🚀",
         parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
     )
+    await state.set_state(OnboardingStates.waiting_for_currency)
+    await message.answer(
+        "💱 Я умею вести и категоризировать твои расходы и доходы.\n"
+        "Поддерживаю разные валюты и по умолчанию буду приводить все суммы к основной валюте.\n\n"
+        "Выбери основную валюту:",
+        reply_markup=_onboarding_currency_keyboard(),
+    )
+
+
+async def _ask_goal_text(message: Message, state: FSMContext) -> None:
+    await state.set_state(OnboardingStates.waiting_for_goal)
+    await state.update_data(onboarding_categories_step=False)
+    await message.answer(
+        "🎯 Для более персонализированного подхода опиши свою финансовую цель.\n"
+        "Например: *«Хочу откладывать 25% зарплаты, формировать пассивный доход, к концу года "
+        "накопить 3 млн рублей, дальше — на первый взнос на ипотеку»*.\n\n"
+        "Чем точнее цель, тем полезнее рекомендации.\n\n"
+        "Напиши цель или нажми `Пропустить цель`.",
+        parse_mode="Markdown",
+        reply_markup=_onboarding_goal_skip_keyboard(),
+    )
+
+
+@router.callback_query(
+    F.data.regexp(r"^onb:cur:"),
+    StateFilter(OnboardingStates.waiting_for_currency),
+)
+async def onboarding_pick_currency(
+    callback: CallbackQuery, session: AsyncSession, state: FSMContext
+) -> None:
+    tg_id = callback.from_user.id
+    value = callback.data.split(":")[-1]
+    result = await session.execute(select(User).where(User.telegram_id == tg_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        await callback.answer("Пользователь не найден")
+        return
+    if value == "CUSTOM":
+        await state.set_state(OnboardingStates.waiting_for_custom_currency)
+        await callback.answer()
+        await callback.message.answer(
+            "Введи код основной валюты (например: `EUR`, `KZT`, `UZS`).",
+            parse_mode="Markdown",
+        )
+        return
+    user.default_currency = value
+    await session.commit()
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(f"✅ Основная валюта: *{value}*", parse_mode="Markdown")
+    await _ask_goal_text(callback.message, state)
+
+
+@router.message(OnboardingStates.waiting_for_custom_currency)
+async def onboarding_custom_currency(
+    message: Message, session: AsyncSession, state: FSMContext
+) -> None:
+    code = message.text.strip().upper()
+    if not code.isalpha() or len(code) != 3:
+        await message.answer("Нужен 3-буквенный код валюты, например `EUR`.", parse_mode="Markdown")
+        return
+    tg_id = message.from_user.id
+    result = await session.execute(select(User).where(User.telegram_id == tg_id))
+    user = result.scalar_one_or_none()
+    if user:
+        user.default_currency = code
+        await session.commit()
+    await message.answer(f"✅ Основная валюта: *{code}*", parse_mode="Markdown")
+    await _ask_goal_text(message, state)
 
 
 @router.message(OnboardingStates.waiting_for_goal)
@@ -133,8 +226,8 @@ async def process_goal(message: Message, session: AsyncSession, state: FSMContex
 
     goal_text = message.text.strip()
     logger.info("Processing goal input user_id=%s skipped=%s", tg_id, goal_text.lower() == "/skip")
-    if goal_text.lower() != "/skip" and user:
-        user.goal = goal_text
+    if user:
+        user.goal = None if goal_text.lower() == "/skip" else goal_text
         await session.commit()
 
     data = await state.get_data()
@@ -160,9 +253,35 @@ async def process_goal(message: Message, session: AsyncSession, state: FSMContex
     else:
         await state.clear()
         await message.answer(
-            "✅ Цель обновлена.",
+            ONBOARDING_DONE_TEXT,
             reply_markup=MAIN_KEYBOARD,
         )
+
+
+@router.callback_query(
+    F.data == "onb:goal_skip",
+    StateFilter(OnboardingStates.waiting_for_goal),
+)
+async def onboarding_skip_goal(
+    callback: CallbackQuery, session: AsyncSession, state: FSMContext
+) -> None:
+    tg_id = callback.from_user.id
+    result = await session.execute(select(User).where(User.telegram_id == tg_id))
+    user = result.scalar_one_or_none()
+    if user:
+        user.goal = None
+        await session.commit()
+    await state.clear()
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(
+        "✅ Продолжаем без цели.\n"
+        "Буду показывать аналитику по доходам и расходам без персональных рекомендаций.",
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 @router.message(OnboardingStates.waiting_for_custom_categories)
@@ -245,7 +364,8 @@ async def cmd_goal(message: Message, session: AsyncSession, state: FSMContext, u
     await state.update_data(onboarding_categories_step=False)
     current = user.goal if user else "не задана"
     await message.answer(
-        f"🎯 Текущая цель: *{current}*\n\nНапиши новую финансовую цель:",
+        f"🎯 Текущая цель: *{current}*\n\n"
+        "Напиши новую финансовую цель или нажми `Пропустить цель`.",
         parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=_onboarding_goal_skip_keyboard(),
     )

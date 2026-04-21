@@ -43,6 +43,16 @@ async def convert_to_rub(amount: Decimal, currency: str) -> tuple[Decimal, Decim
     return (amount * rate).quantize(Decimal("0.01")), rate
 
 
+async def convert_from_rub(amount_rub: Decimal, target_currency: str) -> Decimal:
+    target = (target_currency or "RUB").upper()
+    if target == "RUB":
+        return amount_rub.quantize(Decimal("0.01"))
+    rate_to_rub = await get_rate_to_rub(target)
+    if rate_to_rub == 0:
+        return amount_rub.quantize(Decimal("0.01"))
+    return (amount_rub / rate_to_rub).quantize(Decimal("0.01"))
+
+
 CURRENCY_SYMBOLS = {
     "RUB": "₽",
     "USD": "$",

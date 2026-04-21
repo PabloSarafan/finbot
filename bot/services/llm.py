@@ -89,7 +89,9 @@ def _normalize_category_to_allowed(raw: str, allowed: List[str]) -> str:
 
 
 async def parse_transaction(
-    user_message: str, custom_category_names: Optional[List[str]] = None
+    user_message: str,
+    custom_category_names: Optional[List[str]] = None,
+    default_currency: str = "RUB",
 ) -> Optional[dict]:
     """
     Returns dict with keys: amount, currency, type, category, description
@@ -106,6 +108,11 @@ async def parse_transaction(
         if allowed
         else SYSTEM_PROMPT_DEFAULT
     )
+    base_currency = (default_currency or "RUB").upper()
+    if base_currency != "RUB":
+        system_prompt += (
+            f"\nДополнительное правило: если валюта не указана явно, используй {base_currency}."
+        )
 
     try:
         response = await client.chat.completions.create(
@@ -131,6 +138,7 @@ async def parse_transaction(
         if data["type"] not in ("income", "expense"):
             return None
         data["amount"] = Decimal(str(data["amount"]))
+        data["currency"] = str(data["currency"]).upper()
         if allowed:
             data["category"] = _normalize_category_to_allowed(str(data.get("category", "")), allowed)
         return data
