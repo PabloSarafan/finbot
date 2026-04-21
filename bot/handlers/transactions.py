@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import Transaction, TransactionType, User, UserCategoryMapping
 from bot.services.llm import parse_transaction
-from bot.services.currency import convert_to_rub, format_amount
+from bot.services.currency import convert_to_rub, convert_from_rub, format_amount
 from bot.handlers.start import MAIN_KEYBOARD, OnboardingStates
 
 router = Router()
@@ -180,7 +180,11 @@ async def handle_transaction(
 
     for item in items:
         t0 = time.perf_counter()
-        parsed = await parse_transaction(item, custom_for_llm)
+        parsed = await parse_transaction(
+            item,
+            custom_for_llm,
+            default_currency=user.default_currency,
+        )
         llm_ms = int((time.perf_counter() - t0) * 1000)
         logger.info("LLM parse duration user_id=%s ms=%s item='%s'", user.telegram_id, llm_ms, item)
         if parsed is None:
@@ -241,8 +245,14 @@ async def handle_transaction(
         )
 
         icon = "💸" if tx_type == "expense" else "💰"
+        base_currency = (user.default_currency or "RUB").upper()
+        base_amount = await convert_from_rub(amount_rub, base_currency)
         orig_str = format_amount(amount_orig, currency)
-        conversion_note = f" (~{amount_rub:,.0f} ₽)" if currency != "RUB" else ""
+        conversion_note = (
+            f" (~{format_amount(base_amount, base_currency)})"
+            if currency != base_currency
+            else ""
+        )
 
         await message.answer(
             f"{icon} *{category}*\n"

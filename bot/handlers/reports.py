@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import Transaction, TransactionType, User, UserCategoryLimit
 from bot.services.charts import build_pie_chart, build_waterfall_chart
 from bot.services.llm import generate_monthly_advice
+from bot.services.currency import convert_from_rub, format_amount
 
 router = Router()
 MONTHS_RU_GENITIVE = {
@@ -162,26 +163,32 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
     for t in incomes:
         inc_by_cat[t.category] = inc_by_cat.get(t.category, 0) + float(t.amount_rub)
 
-    exp_lines = "\n".join(
-        f"  • {cat} — {amt:,.0f} ₽"
-        for cat, amt in sorted(exp_by_cat.items(), key=lambda x: -x[1])
-    )
-    inc_lines = "\n".join(
-        f"  • {cat} — {amt:,.0f} ₽"
-        for cat, amt in sorted(inc_by_cat.items(), key=lambda x: -x[1])
-    )
+    base = (user.default_currency or "RUB").upper()
+    total_exp_base = await convert_from_rub(total_exp, base)
+    total_inc_base = await convert_from_rub(total_inc, base)
+    exp_lines_list: list[str] = []
+    for cat, amt in sorted(exp_by_cat.items(), key=lambda x: -x[1]):
+        val = await convert_from_rub(Decimal(str(amt)), base)
+        exp_lines_list.append(f"  • {cat} — {format_amount(val, base)}")
+    exp_lines = "\n".join(exp_lines_list)
+
+    inc_lines_list: list[str] = []
+    for cat, amt in sorted(inc_by_cat.items(), key=lambda x: -x[1]):
+        val = await convert_from_rub(Decimal(str(amt)), base)
+        inc_lines_list.append(f"  • {cat} — {format_amount(val, base)}")
+    inc_lines = "\n".join(inc_lines_list)
 
     report_date = f"{today.day} {MONTHS_RU_GENITIVE[today.month]}"
     parts: list[str] = [f"📊 *Отчёт за {report_date}*"]
     if not txs:
         parts.append("📭 Сегодня транзакций нет.")
     if total_exp > 0:
-        exp_block = f"💸 *Траты за день: {total_exp:,.0f} ₽*"
+        exp_block = f"💸 *Траты за день: {format_amount(total_exp_base, base)}*"
         if exp_lines:
             exp_block += f"\n{exp_lines}"
         parts.append(exp_block)
     if total_inc > 0:
-        inc_block = f"💰 *Доходы за день: {total_inc:,.0f} ₽*"
+        inc_block = f"💰 *Доходы за день: {format_amount(total_inc_base, base)}*"
         if inc_lines:
             inc_block += f"\n{inc_lines}"
         parts.append(inc_block)
@@ -202,19 +209,24 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
     plan_total = sum(limits_map.values()) if limits_map else Decimal("0")
     if plan_total > 0:
         pct = (mtd_total / plan_total * Decimal("100"))
+        mtd_total_base = await convert_from_rub(mtd_total, base)
+        plan_total_base = await convert_from_rub(plan_total, base)
         parts.append(
-            f"📅 *Траты за месяц (на сегодня):* {mtd_total:,.0f} ₽ / {plan_total:,.0f} ₽ "
-            f"({pct:,.0f}%)"
+            f"📅 *Траты за месяц (на сегодня):* {format_amount(mtd_total_base, base)} / "
+            f"{format_amount(plan_total_base, base)} ({pct:,.0f}%)"
         )
 
     total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, month_start)
     if total_saved > 0 or user.savings_goal_amount_rub:
-        savings_line = f"🏦 *Копилка:* {total_saved:,.0f} ₽"
+        total_saved_base = await convert_from_rub(total_saved, base)
+        savings_line = f"🏦 *Копилка:* {format_amount(total_saved_base, base)}"
         if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
             progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
+            goal_base = await convert_from_rub(user.savings_goal_amount_rub, base)
+            month_saved_base = await convert_from_rub(month_saved, base)
             savings_line += (
-                f" / {user.savings_goal_amount_rub:,.0f} ₽ ({progress:,.0f}%)"
-                f"\n📈 За месяц в копилку: {month_saved:,.0f} ₽"
+                f" / {format_amount(goal_base, base)} ({progress:,.0f}%)"
+                f"\n📈 За месяц в копилку: {format_amount(month_saved_base, base)}"
             )
         parts.append(savings_line)
 
@@ -253,6 +265,10 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
     total_exp = sum(t.amount_rub for t in expenses)
     total_inc = sum(t.amount_rub for t in incomes)
     balance = total_inc - total_exp
+    base = (user.default_currency or "RUB").upper()
+    total_exp_base = await convert_from_rub(total_exp, base)
+    total_inc_base = await convert_from_rub(total_inc, base)
+    balance_base = await convert_from_rub(balance, base)
 
     by_cat: dict[str, Decimal] = {}
     for t in expenses:
@@ -263,15 +279,17 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
     pie_bytes = build_pie_chart(by_cat, f"Расходы за {month_label}")
     wf_bytes = build_waterfall_chart(total_inc, by_cat, month_label)
 
-    sorted_cats = sorted(by_cat.items(), key=lambda x: -x[1])[:5]
-    advice = await generate_monthly_advice(
-        goal=user.goal or "не задана",
-        month=month_label,
-        income=total_inc,
-        expenses=total_exp,
-        balance=balance,
-        categories=sorted_cats,
-    )
+    advice = ""
+    if user.goal:
+        sorted_cats = sorted(by_cat.items(), key=lambda x: -x[1])[:5]
+        advice = await generate_monthly_advice(
+            goal=user.goal,
+            month=month_label,
+            income=total_inc,
+            expenses=total_exp,
+            balance=balance,
+            categories=sorted_cats,
+        )
 
     if pie_bytes:
         await message.answer_photo(
@@ -284,7 +302,7 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
             caption="📊 Доходы / расходы",
         )
 
-    sign = "+" if balance >= 0 else ""
+    sign = "+" if balance >= 0 else "-"
     limits_map = await _read_limits_map(session, user.telegram_id)
     plan_lines: list[str] = []
     if limits_map:
@@ -292,9 +310,14 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
             plan = limits_map.get(cat, Decimal("0"))
             if plan > 0:
                 pct = (spent / plan * Decimal("100"))
-                plan_lines.append(f"  • {cat}: {spent:,.0f} ₽ / {plan:,.0f} ₽ ({pct:,.0f}%)")
+                spent_base = await convert_from_rub(spent, base)
+                plan_base = await convert_from_rub(plan, base)
+                plan_lines.append(
+                    f"  • {cat}: {format_amount(spent_base, base)} / {format_amount(plan_base, base)} ({pct:,.0f}%)"
+                )
             else:
-                plan_lines.append(f"  • {cat}: {spent:,.0f} ₽ / —")
+                spent_base = await convert_from_rub(spent, base)
+                plan_lines.append(f"  • {cat}: {format_amount(spent_base, base)} / —")
 
     limits_block = ""
     if plan_lines:
@@ -304,32 +327,36 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
     savings_block = ""
     if total_saved > 0 or user.savings_goal_amount_rub:
         goal_name = user.savings_goal_name or "Копилка"
+        total_saved_base = await convert_from_rub(total_saved, base)
+        month_saved_base = await convert_from_rub(month_saved, base)
         savings_block = (
-            f"\n\n🏦 *{goal_name}:* {total_saved:,.0f} ₽"
-            f"\n📈 За месяц в копилку: {month_saved:,.0f} ₽"
+            f"\n\n🏦 *{goal_name}:* {format_amount(total_saved_base, base)}"
+            f"\n📈 За месяц в копилку: {format_amount(month_saved_base, base)}"
         )
         if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
             remaining = max(Decimal("0"), user.savings_goal_amount_rub - total_saved)
             progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
+            goal_base = await convert_from_rub(user.savings_goal_amount_rub, base)
+            remaining_base = await convert_from_rub(remaining, base)
             tip = (
                 "Отличный темп, продолжай!" if remaining == 0 else
-                f"Осталось {remaining:,.0f} ₽. Попробуй увеличить ежемесячный вклад в копилку."
+                f"Осталось {format_amount(remaining_base, base)}. Попробуй увеличить ежемесячный вклад в копилку."
             )
             savings_block += (
-                f"\n🎯 Цель: {user.savings_goal_amount_rub:,.0f} ₽ ({progress:,.0f}%)"
+                f"\n🎯 Цель: {format_amount(goal_base, base)} ({progress:,.0f}%)"
                 f"\n💡 {tip}"
             )
 
-    await message.answer(
+    text = (
         f"📅 *{month_label}*\n\n"
-        f"💰 Доходы: *{total_inc:,.0f} ₽*\n"
-        f"💸 Расходы: *{total_exp:,.0f} ₽*\n"
-        f"📊 Баланс: *{sign}{balance:,.0f} ₽*\n\n"
-        f"🎯 *Советы по финансам:*\n{advice}"
-        f"{limits_block}"
-        f"{savings_block}",
-        parse_mode="Markdown",
+        f"💰 Доходы: *{format_amount(total_inc_base, base)}*\n"
+        f"💸 Расходы: *{format_amount(total_exp_base, base)}*\n"
+        f"📊 Баланс: *{sign}{format_amount(balance_base.copy_abs(), base)}*"
     )
+    if advice:
+        text += f"\n\n🎯 *Советы по финансам:*\n{advice}"
+    text += f"{limits_block}{savings_block}"
+    await message.answer(text, parse_mode="Markdown")
 
 
 @router.message(or_f(Command("stash"), F.text == "🏦 Копилка"))

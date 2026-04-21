@@ -161,16 +161,17 @@ async def send_monthly_report(bot: Bot, user: User, session: AsyncSession) -> No
     # Waterfall chart
     wf_bytes = build_waterfall_chart(total_inc, by_cat_dec, month_label)
 
-    # LLM advice
-    sorted_cats = sorted(by_cat_dec.items(), key=lambda x: -x[1])[:5]
-    advice = await generate_monthly_advice(
-        goal=user.goal or "",
-        month=month_label,
-        income=total_inc,
-        expenses=total_exp,
-        balance=balance,
-        categories=sorted_cats,
-    )
+    advice = ""
+    if user.goal:
+        sorted_cats = sorted(by_cat_dec.items(), key=lambda x: -x[1])[:5]
+        advice = await generate_monthly_advice(
+            goal=user.goal,
+            month=month_label,
+            income=total_inc,
+            expenses=total_exp,
+            balance=balance,
+            categories=sorted_cats,
+        )
 
     sign = "+" if balance >= 0 else ""
     limits_map = await _read_limits_map(session, user.telegram_id)
@@ -191,10 +192,11 @@ async def send_monthly_report(bot: Bot, user: User, session: AsyncSession) -> No
         f"📅 *Месячный отчёт за {month_label}*\n\n"
         f"💰 Доходы: *{total_inc:,.0f} ₽*\n"
         f"💸 Расходы: *{total_exp:,.0f} ₽*\n"
-        f"📊 Баланс: *{sign}{balance:,.0f} ₽*\n\n"
-        f"🎯 *Советы по финансам:*\n{advice}"
-        f"{limits_block}"
+        f"📊 Баланс: *{sign}{balance:,.0f} ₽*"
     )
+    if advice:
+        summary += f"\n\n🎯 *Советы по финансам:*\n{advice}"
+    summary += limits_block
 
     await bot.send_photo(
         user.telegram_id,
