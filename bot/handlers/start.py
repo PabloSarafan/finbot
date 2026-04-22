@@ -153,9 +153,9 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) 
     )
 
 
-async def _ask_goal_text(message: Message, state: FSMContext) -> None:
+async def _ask_goal_text(message: Message, state: FSMContext, with_categories_step: bool) -> None:
     await state.set_state(OnboardingStates.waiting_for_goal)
-    await state.update_data(onboarding_categories_step=False)
+    await state.update_data(onboarding_categories_step=with_categories_step)
     await message.answer(
         "🎯 Для более персонализированного подхода опиши свою финансовую цель.\n"
         "Например: *«Хочу откладывать 25% зарплаты, формировать пассивный доход, к концу года "
@@ -197,7 +197,7 @@ async def onboarding_pick_currency(
     except Exception:
         pass
     await callback.message.answer(f"✅ Основная валюта: *{value}*", parse_mode="Markdown")
-    await _ask_goal_text(callback.message, state)
+    await _ask_goal_text(callback.message, state, with_categories_step=True)
 
 
 @router.message(OnboardingStates.waiting_for_custom_currency)
@@ -215,7 +215,7 @@ async def onboarding_custom_currency(
         user.default_currency = code
         await session.commit()
     await message.answer(f"✅ Основная валюта: *{code}*", parse_mode="Markdown")
-    await _ask_goal_text(message, state)
+    await _ask_goal_text(message, state, with_categories_step=True)
 
 
 @router.message(OnboardingStates.waiting_for_goal)
@@ -258,6 +258,25 @@ async def process_goal(message: Message, session: AsyncSession, state: FSMContex
         )
 
 
+async def _go_to_categories_step(message: Message, state: FSMContext) -> None:
+    await state.set_state(OnboardingStates.waiting_for_custom_categories)
+    await message.answer(
+        "📂 *Категории*\n\n"
+        "Напиши свои категории для трат и доходов — каждую с новой строки или через запятую.\n"
+        "Пример:\n"
+        "`Еда, Кафе, Транспорт, Подписки, Зарплата`\n\n"
+        "Я буду выбирать только из этого списка. Потом всё равно можно поправить категорию "
+        "кнопкой *✏️ Изменить* под записью.\n\n"
+        "Или нажми *Пропустить*, чтобы категории подбирались автоматически.",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer(
+        "Выбери действие:",
+        reply_markup=_onboarding_categories_keyboard(),
+    )
+
+
 @router.callback_query(
     F.data == "onb:goal_skip",
     StateFilter(OnboardingStates.waiting_for_goal),
@@ -271,17 +290,26 @@ async def onboarding_skip_goal(
     if user:
         user.goal = None
         await session.commit()
-    await state.clear()
+    data = await state.get_data()
+    do_categories = bool(data.get("onboarding_categories_step"))
     await callback.answer()
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    await callback.message.answer(
-        "✅ Продолжаем без цели.\n"
-        "Буду показывать аналитику по доходам и расходам без персональных рекомендаций.",
-        reply_markup=MAIN_KEYBOARD,
-    )
+    if do_categories:
+        await callback.message.answer(
+            "✅ Продолжаем без цели.\n"
+            "Рекомендации по цели отключены, но аналитику и отчёты ты получишь."
+        )
+        await _go_to_categories_step(callback.message, state)
+    else:
+        await state.clear()
+        await callback.message.answer(
+            "✅ Продолжаем без цели.\n"
+            "Буду показывать аналитику по доходам и расходам без персональных рекомендаций.",
+            reply_markup=MAIN_KEYBOARD,
+        )
 
 
 @router.message(OnboardingStates.waiting_for_custom_categories)
