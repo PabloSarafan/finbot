@@ -235,11 +235,12 @@ async def handle_transaction(
         await session.commit()
         db_ms = int((time.perf_counter() - t2) * 1000)
         logger.info(
-            "Transaction saved user_id=%s tx_id=%s type=%s category=%s amount_rub=%s db_commit_ms=%s",
+            "Transaction saved user_id=%s tx_id=%s type=%s category=%s description=%s amount_rub=%s db_commit_ms=%s",
             user.telegram_id,
             tx_id,
             tx_type,
             category,
+            description,
             amount_rub,
             db_ms,
         )
@@ -254,12 +255,13 @@ async def handle_transaction(
             else ""
         )
 
+        reply_markup = None if custom_cat else _confirm_kb(tx_id)
         await message.answer(
             f"{icon} *{category}*\n"
             f"{description} — {orig_str}{conversion_note}\n"
             f"✅ Сохранено",
             parse_mode="Markdown",
-            reply_markup=_confirm_kb(tx_id),
+            reply_markup=reply_markup,
         )
         saved += 1
 
@@ -283,7 +285,32 @@ async def handle_transaction(
 # ── Callback: confirm (close keyboard) ───────────────────────────────────────
 
 @router.callback_query(F.data.startswith("cat:ok:"))
-async def cb_confirm(callback: CallbackQuery) -> None:
+async def cb_confirm(callback: CallbackQuery, session: AsyncSession) -> None:
+    cid = callback.data[7:]
+    tx_id = _expand(cid)
+    result = await session.execute(select(Transaction).where(Transaction.id == tx_id))
+    tx = result.scalar_one_or_none()
+    if tx:
+        keyword = tx.description.lower().strip()
+        if keyword:
+            existing_result = await session.execute(
+                select(UserCategoryMapping).where(
+                    UserCategoryMapping.user_id == tx.user_id,
+                    UserCategoryMapping.keyword == keyword,
+                )
+            )
+            existing = existing_result.scalar_one_or_none()
+            if existing:
+                existing.category = tx.category
+            else:
+                session.add(
+                    UserCategoryMapping(
+                        user_id=tx.user_id,
+                        keyword=keyword,
+                        category=tx.category,
+                    )
+                )
+            await session.commit()
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
 

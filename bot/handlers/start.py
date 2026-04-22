@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 import logging
+from decimal import Decimal
+import re
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command, or_f, StateFilter
@@ -14,10 +16,11 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import User
+from db.models import User, UserCategoryLimit
+from bot.services.currency import convert_to_rub
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -38,6 +41,7 @@ class OnboardingStates(StatesGroup):
     waiting_for_custom_currency = State()
     waiting_for_goal = State()
     waiting_for_custom_categories = State()
+    waiting_for_limits = State()
 
 
 ONBOARDING_DONE_TEXT = (
@@ -78,6 +82,14 @@ def _onboarding_categories_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _onboarding_limits_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Пропустить", callback_data="onb:limits_skip")]
+        ]
+    )
+
+
 def _onboarding_currency_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -96,6 +108,24 @@ def _onboarding_goal_skip_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Пропустить цель", callback_data="onb:goal_skip")]
         ]
     )
+
+
+def _parse_limit_lines(text: str) -> list[tuple[str, Decimal]]:
+    rows: list[tuple[str, Decimal]] = []
+    parts = text.replace("\r", "\n").replace(";", "\n").replace(",", "\n").split("\n")
+    for raw in parts:
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^\s*(.+?)\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)\s*$", line)
+        if not m:
+            continue
+        category = m.group(1).strip()
+        value = Decimal(m.group(2).replace(",", "."))
+        if value < 0:
+            continue
+        rows.append((category, value))
+    return rows
 
 
 @router.message(CommandStart())
@@ -138,16 +168,15 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) 
 
     await message.answer(
         "🎉 Добро пожаловать!\n\n"
-        "Привет! Я *Бобби* — твой помощник по личным финансам.\n"
+        "Я *Бобби* — твой помощник по личным финансам.\n"
         "Помогу вести учёт расходов и доходов и достигать финансовых целей.\n\n"
-        "Жми Старт и погнали 🚀",
+        "Я умею вести и категоризировать твои расходы и доходы.",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(OnboardingStates.waiting_for_currency)
     await message.answer(
-        "💱 Я умею вести и категоризировать твои расходы и доходы.\n"
-        "Поддерживаю разные валюты и по умолчанию буду приводить все суммы к основной валюте.\n\n"
+        "💱 Поддерживаю разные валюты и по умолчанию буду приводить все суммы к основной валюте.\n"
         "Выбери основную валюту:",
         reply_markup=_onboarding_currency_keyboard(),
     )
@@ -234,22 +263,8 @@ async def process_goal(message: Message, session: AsyncSession, state: FSMContex
     do_categories = bool(data.get("onboarding_categories_step"))
 
     if do_categories:
-        await state.set_state(OnboardingStates.waiting_for_custom_categories)
-        await message.answer(
-            "📂 *Категории*\n\n"
-            "Напиши свои категории для трат и доходов — каждую с новой строки или через запятую.\n"
-            "Пример:\n"
-            "`Еда, Кафе, Транспорт, Подписки, Зарплата`\n\n"
-            "Я буду выбирать только из этого списка. Потом всё равно можно поправить категорию "
-            "кнопкой *✏️ Изменить* под записью.\n\n"
-            "Или нажми *Пропустить*, чтобы категории подбирались автоматически.",
-            parse_mode="Markdown",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        await message.answer(
-            "Выбери действие:",
-            reply_markup=_onboarding_categories_keyboard(),
-        )
+        await message.answer("✅ Отлично, цель зафиксирована. Давай перейдём к категориям.")
+        await _go_to_categories_step(message, state)
     else:
         await state.clear()
         await message.answer(
@@ -271,9 +286,20 @@ async def _go_to_categories_step(message: Message, state: FSMContext) -> None:
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
+    await message.answer("Или нажми кнопку ниже:", reply_markup=_onboarding_categories_keyboard())
+
+
+async def _go_to_limits_step(message: Message, state: FSMContext, currency: str) -> None:
+    await state.set_state(OnboardingStates.waiting_for_limits)
     await message.answer(
-        "Выбери действие:",
-        reply_markup=_onboarding_categories_keyboard(),
+        "📌 *Лимиты по категориям (в месяц)*\n\n"
+        f"Указывай лимиты в основной валюте: *{currency}*.\n"
+        "Можно вводить с новой строки или через запятую.\n"
+        "Пример:\n"
+        "`Еда 30000, Кафе 15000, Транспорт 10000`\n\n"
+        "Если пока не хочешь задавать лимиты, нажми `Пропустить`.",
+        parse_mode="Markdown",
+        reply_markup=_onboarding_limits_keyboard(),
     )
 
 
@@ -326,12 +352,14 @@ async def process_custom_categories(
         if user:
             user.custom_categories = None
             await session.commit()
-        await state.clear()
+            currency = (user.default_currency or "RUB").upper()
+        else:
+            currency = "RUB"
         await message.answer(
-            ONBOARDING_DONE_TEXT + "\n\n_Категории: автоматический подбор._",
+            "✅ Категории: автоматический подбор.",
             parse_mode="Markdown",
-            reply_markup=MAIN_KEYBOARD,
         )
+        await _go_to_limits_step(message, state, currency)
         return
 
     names = _parse_category_lines(text)
@@ -347,16 +375,18 @@ async def process_custom_categories(
     if user:
         user.custom_categories = names
         await session.commit()
+        currency = (user.default_currency or "RUB").upper()
+    else:
+        currency = "RUB"
 
-    await state.clear()
     preview = ", ".join(names[:8])
     if len(names) > 8:
         preview += "…"
     await message.answer(
-        ONBOARDING_DONE_TEXT + f"\n\n_Твои категории:_ {preview}",
+        f"✅ Категории сохранены: {preview}",
         parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD,
     )
+    await _go_to_limits_step(message, state, currency)
 
 
 @router.callback_query(
@@ -373,6 +403,76 @@ async def onboarding_skip_categories(
     if user:
         user.custom_categories = None
         await session.commit()
+        currency = (user.default_currency or "RUB").upper()
+    else:
+        currency = "RUB"
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(
+        "✅ Категории: автоматический подбор.",
+    )
+    await _go_to_limits_step(callback.message, state, currency)
+
+
+@router.message(OnboardingStates.waiting_for_limits)
+async def process_onboarding_limits(
+    message: Message, session: AsyncSession, state: FSMContext
+) -> None:
+    tg_id = message.from_user.id
+    text = message.text.strip()
+    result = await session.execute(select(User).where(User.telegram_id == tg_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        await state.clear()
+        return
+
+    if text.lower() == "/skip":
+        await state.clear()
+        await message.answer(
+            "✅ Лимиты пропущены.\n\n" + ONBOARDING_DONE_TEXT,
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    parsed = _parse_limit_lines(text)
+    if not parsed:
+        await message.answer(
+            "Не смог разобрать лимиты. Используй формат:\n"
+            "`Еда 30000, Кафе 15000`\nили по одной строке.",
+            parse_mode="Markdown",
+        )
+        return
+
+    await session.execute(
+        delete(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
+    )
+    for cat, val in parsed:
+        val_rub, _ = await convert_to_rub(val, (user.default_currency or "RUB").upper())
+        session.add(
+            UserCategoryLimit(
+                user_id=user.telegram_id,
+                category=cat,
+                monthly_limit_rub=val_rub,
+            )
+        )
+    await session.commit()
+    await state.clear()
+    await message.answer(
+        f"✅ Лимиты сохранены: {len(parsed)} категорий.\n\n{ONBOARDING_DONE_TEXT}",
+        parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+@router.callback_query(
+    F.data == "onb:limits_skip",
+    StateFilter(OnboardingStates.waiting_for_limits),
+)
+async def onboarding_skip_limits(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.answer()
     try:
@@ -380,7 +480,7 @@ async def onboarding_skip_categories(
     except Exception:
         pass
     await callback.message.answer(
-        ONBOARDING_DONE_TEXT + "\n\n_Категории: автоматический подбор._",
+        "✅ Лимиты пропущены.\n\n" + ONBOARDING_DONE_TEXT,
         parse_mode="Markdown",
         reply_markup=MAIN_KEYBOARD,
     )
