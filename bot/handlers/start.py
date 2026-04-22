@@ -41,7 +41,6 @@ class OnboardingStates(StatesGroup):
     waiting_for_custom_currency = State()
     waiting_for_goal = State()
     waiting_for_custom_categories = State()
-    waiting_for_limits = State()
 
 
 ONBOARDING_DONE_TEXT = (
@@ -82,14 +81,6 @@ def _onboarding_categories_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _onboarding_limits_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Пропустить", callback_data="onb:limits_skip")]
-        ]
-    )
-
-
 def _onboarding_currency_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -110,22 +101,29 @@ def _onboarding_goal_skip_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _parse_limit_lines(text: str) -> list[tuple[str, Decimal]]:
-    rows: list[tuple[str, Decimal]] = []
+def _parse_categories_and_limits(text: str) -> tuple[list[str], dict[str, Decimal]]:
+    names: list[str] = []
+    limits: dict[str, Decimal] = {}
+    seen: set[str] = set()
     parts = text.replace("\r", "\n").replace(";", "\n").replace(",", "\n").split("\n")
     for raw in parts:
         line = raw.strip()
-        if not line:
+        if not line or line.lower() == "/skip":
             continue
         m = re.match(r"^\s*(.+?)\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)\s*$", line)
-        if not m:
+        if m:
+            category = m.group(1).strip()
+            value = Decimal(m.group(2).replace(",", "."))
+            if category and value >= 0:
+                limits[category] = value
+                if category not in seen:
+                    seen.add(category)
+                    names.append(category)
             continue
-        category = m.group(1).strip()
-        value = Decimal(m.group(2).replace(",", "."))
-        if value < 0:
-            continue
-        rows.append((category, value))
-    return rows
+        if line not in seen:
+            seen.add(line)
+            names.append(line)
+    return names[:40], limits
 
 
 @router.message(CommandStart())
@@ -276,30 +274,20 @@ async def process_goal(message: Message, session: AsyncSession, state: FSMContex
 async def _go_to_categories_step(message: Message, state: FSMContext) -> None:
     await state.set_state(OnboardingStates.waiting_for_custom_categories)
     await message.answer(
-        "📂 *Категории*\n\n"
-        "Напиши свои категории для трат и доходов — каждую с новой строки или через запятую.\n"
+        "📂📌 *Категории и лимиты*\n\n"
+        "На этом шаге можно сразу задать категории и лимиты по ним.\n"
+        "Форматы:\n"
+        "• только категория: `Еда`\n"
+        "• категория + лимит: `Еда 30000`\n"
+        "Можно отправлять с новой строки или через запятую.\n\n"
         "Пример:\n"
-        "`Еда, Кафе, Транспорт, Подписки, Зарплата`\n\n"
+        "`Еда 30000, Кафе 15000, Транспорт, Подписки, Зарплата`\n\n"
         "Я буду выбирать только из этого списка. Потом всё равно можно поправить категорию "
         "кнопкой *✏️ Изменить* под записью.\n\n"
-        "Или нажми *Пропустить*, чтобы категории подбирались автоматически.",
+        "Если не хочешь настраивать сейчас — нажми *Пропустить*.\n"
+        "Категории и лимиты можно задать позже через `/limits` и в редактировании категорий.",
         parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await message.answer("Или нажми кнопку ниже:", reply_markup=_onboarding_categories_keyboard())
-
-
-async def _go_to_limits_step(message: Message, state: FSMContext, currency: str) -> None:
-    await state.set_state(OnboardingStates.waiting_for_limits)
-    await message.answer(
-        "📌 *Лимиты по категориям (в месяц)*\n\n"
-        f"Указывай лимиты в основной валюте: *{currency}*.\n"
-        "Можно вводить с новой строки или через запятую.\n"
-        "Пример:\n"
-        "`Еда 30000, Кафе 15000, Транспорт 10000`\n\n"
-        "Если пока не хочешь задавать лимиты, нажми `Пропустить`.",
-        parse_mode="Markdown",
-        reply_markup=_onboarding_limits_keyboard(),
+        reply_markup=_onboarding_categories_keyboard(),
     )
 
 
@@ -351,22 +339,23 @@ async def process_custom_categories(
         user = result.scalar_one_or_none()
         if user:
             user.custom_categories = None
+            await session.execute(
+                delete(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
+            )
             await session.commit()
-            currency = (user.default_currency or "RUB").upper()
-        else:
-            currency = "RUB"
+        await state.clear()
         await message.answer(
-            "✅ Категории: автоматический подбор.",
+            "✅ Пропустили настройку категорий и лимитов.\n\n" + ONBOARDING_DONE_TEXT,
             parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
         )
-        await _go_to_limits_step(message, state, currency)
         return
 
-    names = _parse_category_lines(text)
+    names, limits_map = _parse_categories_and_limits(text)
     if not names:
         await message.answer(
-            "Не вижу ни одной категории. Напиши список через запятую или с новой строки, "
-            "или отправь /skip для авто-категорий."
+            "Не вижу ни одной категории. Напиши список через запятую/с новой строки "
+            "или отправь /skip."
         )
         return
 
@@ -374,19 +363,30 @@ async def process_custom_categories(
     user = result.scalar_one_or_none()
     if user:
         user.custom_categories = names
+        await session.execute(
+            delete(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
+        )
+        for category, value in limits_map.items():
+            val_rub, _ = await convert_to_rub(value, (user.default_currency or "RUB").upper())
+            session.add(
+                UserCategoryLimit(
+                    user_id=user.telegram_id,
+                    category=category,
+                    monthly_limit_rub=val_rub,
+                )
+            )
         await session.commit()
-        currency = (user.default_currency or "RUB").upper()
-    else:
-        currency = "RUB"
 
+    await state.clear()
     preview = ", ".join(names[:8])
     if len(names) > 8:
         preview += "…"
+    limits_note = f"\n\n✅ Лимиты сохранены: {len(limits_map)}." if limits_map else ""
     await message.answer(
-        f"✅ Категории сохранены: {preview}",
+        f"✅ Категории сохранены: {preview}{limits_note}\n\n{ONBOARDING_DONE_TEXT}",
         parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
     )
-    await _go_to_limits_step(message, state, currency)
 
 
 @router.callback_query(
@@ -402,77 +402,10 @@ async def onboarding_skip_categories(
     user = result.scalar_one_or_none()
     if user:
         user.custom_categories = None
+        await session.execute(
+            delete(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
+        )
         await session.commit()
-        currency = (user.default_currency or "RUB").upper()
-    else:
-        currency = "RUB"
-    await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await callback.message.answer(
-        "✅ Категории: автоматический подбор.",
-    )
-    await _go_to_limits_step(callback.message, state, currency)
-
-
-@router.message(OnboardingStates.waiting_for_limits)
-async def process_onboarding_limits(
-    message: Message, session: AsyncSession, state: FSMContext
-) -> None:
-    tg_id = message.from_user.id
-    text = message.text.strip()
-    result = await session.execute(select(User).where(User.telegram_id == tg_id))
-    user = result.scalar_one_or_none()
-    if user is None:
-        await state.clear()
-        return
-
-    if text.lower() == "/skip":
-        await state.clear()
-        await message.answer(
-            "✅ Лимиты пропущены.\n\n" + ONBOARDING_DONE_TEXT,
-            parse_mode="Markdown",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-
-    parsed = _parse_limit_lines(text)
-    if not parsed:
-        await message.answer(
-            "Не смог разобрать лимиты. Используй формат:\n"
-            "`Еда 30000, Кафе 15000`\nили по одной строке.",
-            parse_mode="Markdown",
-        )
-        return
-
-    await session.execute(
-        delete(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
-    )
-    for cat, val in parsed:
-        val_rub, _ = await convert_to_rub(val, (user.default_currency or "RUB").upper())
-        session.add(
-            UserCategoryLimit(
-                user_id=user.telegram_id,
-                category=cat,
-                monthly_limit_rub=val_rub,
-            )
-        )
-    await session.commit()
-    await state.clear()
-    await message.answer(
-        f"✅ Лимиты сохранены: {len(parsed)} категорий.\n\n{ONBOARDING_DONE_TEXT}",
-        parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-@router.callback_query(
-    F.data == "onb:limits_skip",
-    StateFilter(OnboardingStates.waiting_for_limits),
-)
-async def onboarding_skip_limits(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.answer()
     try:
@@ -480,7 +413,7 @@ async def onboarding_skip_limits(callback: CallbackQuery, state: FSMContext) -> 
     except Exception:
         pass
     await callback.message.answer(
-        "✅ Лимиты пропущены.\n\n" + ONBOARDING_DONE_TEXT,
+        "✅ Пропустили настройку категорий и лимитов.\n\n" + ONBOARDING_DONE_TEXT,
         parse_mode="Markdown",
         reply_markup=MAIN_KEYBOARD,
     )
