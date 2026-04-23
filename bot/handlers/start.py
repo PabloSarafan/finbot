@@ -333,6 +333,17 @@ async def process_custom_categories(
     tg_id = message.from_user.id
     text = message.text.strip()
     logger.info("Processing custom categories user_id=%s skipped=%s", tg_id, text.lower() == "/skip")
+    if text in ("📊 Отчёт за сегодня", "/report", "📅 Месячный отчёт", "/month"):
+        await state.clear()
+        result = await session.execute(select(User).where(User.telegram_id == tg_id))
+        user = result.scalar_one_or_none()
+        if user:
+            from bot.handlers.reports import cmd_report, cmd_month
+            if text in ("📊 Отчёт за сегодня", "/report"):
+                await cmd_report(message, session, user)
+            else:
+                await cmd_month(message, session, user)
+        return
 
     if text.lower() == "/skip":
         result = await session.execute(select(User).where(User.telegram_id == tg_id))

@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import logging
 import re
 from typing import Optional
 
@@ -26,6 +27,7 @@ from bot.services.currency import convert_from_rub, convert_to_rub, format_amoun
 from bot.handlers.start import MAIN_KEYBOARD
 
 router = Router()
+logger = logging.getLogger(__name__)
 MONTHS_RU_GENITIVE = {
     1: "Января",
     2: "Февраля",
@@ -166,229 +168,235 @@ async def _read_savings_stats(
 async def cmd_report(message: Message, session: AsyncSession, user: User = None) -> None:
     if user is None:
         return
+    try:
+        today = date.today()
+        start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        month_start = _month_start(today)
 
-    today = date.today()
-    start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
-    month_start = _month_start(today)
-
-    result = await session.execute(
-        select(Transaction).where(
-            and_(
-                Transaction.user_id == user.telegram_id,
-                Transaction.created_at >= start,
+        result = await session.execute(
+            select(Transaction).where(
+                and_(
+                    Transaction.user_id == user.telegram_id,
+                    Transaction.created_at >= start,
+                )
             )
         )
-    )
-    txs = result.scalars().all()
+        txs = result.scalars().all()
 
-    expenses = [t for t in txs if t.type == TransactionType.expense]
-    incomes = [t for t in txs if t.type == TransactionType.income]
+        expenses = [t for t in txs if t.type == TransactionType.expense]
+        incomes = [t for t in txs if t.type == TransactionType.income]
 
-    total_exp = sum(t.amount_rub for t in expenses)
-    total_inc = sum(t.amount_rub for t in incomes)
+        total_exp = sum(t.amount_rub for t in expenses)
+        total_inc = sum(t.amount_rub for t in incomes)
 
-    exp_by_cat: dict[str, float] = {}
-    for t in expenses:
-        exp_by_cat[t.category] = exp_by_cat.get(t.category, 0) + float(t.amount_rub)
+        exp_by_cat: dict[str, float] = {}
+        for t in expenses:
+            exp_by_cat[t.category] = exp_by_cat.get(t.category, 0) + float(t.amount_rub)
 
-    inc_by_cat: dict[str, float] = {}
-    for t in incomes:
-        inc_by_cat[t.category] = inc_by_cat.get(t.category, 0) + float(t.amount_rub)
+        inc_by_cat: dict[str, float] = {}
+        for t in incomes:
+            inc_by_cat[t.category] = inc_by_cat.get(t.category, 0) + float(t.amount_rub)
 
-    base = (user.default_currency or "RUB").upper()
-    total_exp_base = await convert_from_rub(total_exp, base)
-    total_inc_base = await convert_from_rub(total_inc, base)
-    exp_lines_list: list[str] = []
-    for cat, amt in sorted(exp_by_cat.items(), key=lambda x: -x[1]):
-        val = await convert_from_rub(Decimal(str(amt)), base)
-        exp_lines_list.append(f"  • {cat} — {format_amount(val, base)}")
-    exp_lines = "\n".join(exp_lines_list)
+        base = (user.default_currency or "RUB").upper()
+        total_exp_base = await convert_from_rub(total_exp, base)
+        total_inc_base = await convert_from_rub(total_inc, base)
+        exp_lines_list: list[str] = []
+        for cat, amt in sorted(exp_by_cat.items(), key=lambda x: -x[1]):
+            val = await convert_from_rub(Decimal(str(amt)), base)
+            exp_lines_list.append(f"  • {cat} — {format_amount(val, base)}")
+        exp_lines = "\n".join(exp_lines_list)
 
-    inc_lines_list: list[str] = []
-    for cat, amt in sorted(inc_by_cat.items(), key=lambda x: -x[1]):
-        val = await convert_from_rub(Decimal(str(amt)), base)
-        inc_lines_list.append(f"  • {cat} — {format_amount(val, base)}")
-    inc_lines = "\n".join(inc_lines_list)
+        inc_lines_list: list[str] = []
+        for cat, amt in sorted(inc_by_cat.items(), key=lambda x: -x[1]):
+            val = await convert_from_rub(Decimal(str(amt)), base)
+            inc_lines_list.append(f"  • {cat} — {format_amount(val, base)}")
+        inc_lines = "\n".join(inc_lines_list)
 
-    report_date = f"{today.day} {MONTHS_RU_GENITIVE[today.month]}"
-    parts: list[str] = [f"📊 *Отчёт за {report_date}*"]
-    if not txs:
-        parts.append("📭 Сегодня транзакций нет.")
-    if total_exp > 0:
-        exp_block = f"💸 *Траты за день: {format_amount(total_exp_base, base)}*"
-        if exp_lines:
-            exp_block += f"\n{exp_lines}"
-        parts.append(exp_block)
-    if total_inc > 0:
-        inc_block = f"💰 *Доходы за день: {format_amount(total_inc_base, base)}*"
-        if inc_lines:
-            inc_block += f"\n{inc_lines}"
-        parts.append(inc_block)
+        report_date = f"{today.day} {MONTHS_RU_GENITIVE[today.month]}"
+        parts: list[str] = [f"📊 Отчёт за {report_date}"]
+        if not txs:
+            parts.append("📭 Сегодня транзакций нет.")
+        if total_exp > 0:
+            exp_block = f"💸 Траты за день: {format_amount(total_exp_base, base)}"
+            if exp_lines:
+                exp_block += f"\n{exp_lines}"
+            parts.append(exp_block)
+        if total_inc > 0:
+            inc_block = f"💰 Доходы за день: {format_amount(total_inc_base, base)}"
+            if inc_lines:
+                inc_block += f"\n{inc_lines}"
+            parts.append(inc_block)
 
-    # Month-to-date expenses vs configured monthly budget
-    mtd_result = await session.execute(
-        select(Transaction).where(
-            and_(
-                Transaction.user_id == user.telegram_id,
-                Transaction.created_at >= month_start,
-                Transaction.type == TransactionType.expense,
+        # Month-to-date expenses vs configured monthly budget
+        mtd_result = await session.execute(
+            select(Transaction).where(
+                and_(
+                    Transaction.user_id == user.telegram_id,
+                    Transaction.created_at >= month_start,
+                    Transaction.type == TransactionType.expense,
+                )
             )
         )
-    )
-    mtd_expenses = mtd_result.scalars().all()
-    mtd_total = sum(t.amount_rub for t in mtd_expenses)
-    limits_map = await _read_limits_map(session, user.telegram_id)
-    plan_total = sum(limits_map.values()) if limits_map else Decimal("0")
-    if plan_total > 0:
-        pct = (mtd_total / plan_total * Decimal("100"))
-        mtd_total_base = await convert_from_rub(mtd_total, base)
-        plan_total_base = await convert_from_rub(plan_total, base)
-        parts.append(
-            f"📅 *Траты за месяц (на сегодня):* {format_amount(mtd_total_base, base)} / "
-            f"{format_amount(plan_total_base, base)} ({pct:,.0f}%)"
-        )
-
-    total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, month_start)
-    if total_saved > 0 or user.savings_goal_amount_rub:
-        total_saved_base = await convert_from_rub(total_saved, base)
-        savings_line = f"🏦 *Копилка:* {format_amount(total_saved_base, base)}"
-        if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
-            progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
-            goal_base = await convert_from_rub(user.savings_goal_amount_rub, base)
-            month_saved_base = await convert_from_rub(month_saved, base)
-            savings_line += (
-                f" / {format_amount(goal_base, base)} ({progress:,.0f}%)"
-                f"\n📈 За месяц в копилку: {format_amount(month_saved_base, base)}"
+        mtd_expenses = mtd_result.scalars().all()
+        mtd_total = sum(t.amount_rub for t in mtd_expenses)
+        limits_map = await _read_limits_map(session, user.telegram_id)
+        plan_total = sum(limits_map.values()) if limits_map else Decimal("0")
+        if plan_total > 0:
+            pct = (mtd_total / plan_total * Decimal("100"))
+            mtd_total_base = await convert_from_rub(mtd_total, base)
+            plan_total_base = await convert_from_rub(plan_total, base)
+            parts.append(
+                f"📅 Траты за месяц (на сегодня): {format_amount(mtd_total_base, base)} / "
+                f"{format_amount(plan_total_base, base)} ({pct:,.0f}%)"
             )
-        parts.append(savings_line)
 
-    await message.answer("\n\n".join(parts), parse_mode="Markdown")
+        total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, month_start)
+        if total_saved > 0 or user.savings_goal_amount_rub:
+            total_saved_base = await convert_from_rub(total_saved, base)
+            savings_line = f"🏦 Копилка: {format_amount(total_saved_base, base)}"
+            if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
+                progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
+                goal_base = await convert_from_rub(user.savings_goal_amount_rub, base)
+                month_saved_base = await convert_from_rub(month_saved, base)
+                savings_line += (
+                    f" / {format_amount(goal_base, base)} ({progress:,.0f}%)"
+                    f"\n📈 За месяц в копилку: {format_amount(month_saved_base, base)}"
+                )
+            parts.append(savings_line)
+
+        await message.answer("\n\n".join(parts), parse_mode=None)
+    except Exception:
+        logger.exception("Failed to build daily report user_id=%s", user.telegram_id)
+        await message.answer("Не получилось собрать отчёт за сегодня. Попробуй ещё раз через минуту.")
 
 
 @router.message(or_f(Command("month"), F.text == "📅 Месячный отчёт"))
 async def cmd_month(message: Message, session: AsyncSession, user: User = None) -> None:
     if user is None:
         return
+    try:
+        today = date.today()
+        start = _month_start(today)
+        end = _next_month_start(today)
 
-    today = date.today()
-    start = _month_start(today)
-    end = _next_month_start(today)
-
-    result = await session.execute(
-        select(Transaction).where(
-            and_(
-                Transaction.user_id == user.telegram_id,
-                Transaction.created_at >= start,
-                Transaction.created_at < end,
-            )
-        )
-    )
-    txs = result.scalars().all()
-
-    if not txs:
-        await message.answer("📭 В этом месяце транзакций нет.")
-        return
-
-    await message.answer("⏳ Формирую отчёт, подожди...")
-
-    expenses = [t for t in txs if t.type == TransactionType.expense]
-    incomes = [t for t in txs if t.type == TransactionType.income]
-
-    total_exp = sum(t.amount_rub for t in expenses)
-    total_inc = sum(t.amount_rub for t in incomes)
-    balance = total_inc - total_exp
-    base = (user.default_currency or "RUB").upper()
-    total_exp_base = await convert_from_rub(total_exp, base)
-    total_inc_base = await convert_from_rub(total_inc, base)
-    balance_base = await convert_from_rub(balance, base)
-
-    by_cat: dict[str, Decimal] = {}
-    for t in expenses:
-        by_cat[t.category] = by_cat.get(t.category, Decimal("0")) + t.amount_rub
-
-    month_label = start.strftime("%B %Y")
-
-    pie_bytes = build_pie_chart(by_cat, f"Расходы за {month_label}")
-    wf_bytes = build_waterfall_chart(total_inc, by_cat, month_label)
-
-    advice = ""
-    if user.goal:
-        sorted_cats = sorted(by_cat.items(), key=lambda x: -x[1])[:5]
-        advice = await generate_monthly_advice(
-            goal=user.goal,
-            month=month_label,
-            income=total_inc,
-            expenses=total_exp,
-            balance=balance,
-            categories=sorted_cats,
-        )
-
-    if pie_bytes:
-        await message.answer_photo(
-            BufferedInputFile(pie_bytes, filename="pie.png"),
-            caption="🥧 Расходы по категориям",
-        )
-    if wf_bytes:
-        await message.answer_photo(
-            BufferedInputFile(wf_bytes, filename="waterfall.png"),
-            caption="📊 Доходы / расходы",
-        )
-
-    sign = "+" if balance >= 0 else "-"
-    limits_map = await _read_limits_map(session, user.telegram_id)
-    plan_lines: list[str] = []
-    if limits_map:
-        for cat, spent in sorted(by_cat.items(), key=lambda x: -x[1]):
-            plan = limits_map.get(cat, Decimal("0"))
-            if plan > 0:
-                pct = (spent / plan * Decimal("100"))
-                spent_base = await convert_from_rub(spent, base)
-                plan_base = await convert_from_rub(plan, base)
-                plan_lines.append(
-                    f"  • {cat}: {format_amount(spent_base, base)} / {format_amount(plan_base, base)} ({pct:,.0f}%)"
+        result = await session.execute(
+            select(Transaction).where(
+                and_(
+                    Transaction.user_id == user.telegram_id,
+                    Transaction.created_at >= start,
+                    Transaction.created_at < end,
                 )
-            else:
-                spent_base = await convert_from_rub(spent, base)
-                plan_lines.append(f"  • {cat}: {format_amount(spent_base, base)} / —")
-
-    limits_block = ""
-    if plan_lines:
-        limits_block = "\n\n📌 *По категориям (факт vs план):*\n" + "\n".join(plan_lines[:12])
-
-    total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, start)
-    savings_block = ""
-    if total_saved > 0 or user.savings_goal_amount_rub:
-        goal_name = user.savings_goal_name or "Копилка"
-        total_saved_base = await convert_from_rub(total_saved, base)
-        month_saved_base = await convert_from_rub(month_saved, base)
-        savings_block = (
-            f"\n\n🏦 *{goal_name}:* {format_amount(total_saved_base, base)}"
-            f"\n📈 За месяц в копилку: {format_amount(month_saved_base, base)}"
+            )
         )
-        if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
-            remaining = max(Decimal("0"), user.savings_goal_amount_rub - total_saved)
-            progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
-            goal_base = await convert_from_rub(user.savings_goal_amount_rub, base)
-            remaining_base = await convert_from_rub(remaining, base)
-            tip = (
-                "Отличный темп, продолжай!" if remaining == 0 else
-                f"Осталось {format_amount(remaining_base, base)}. Попробуй увеличить ежемесячный вклад в копилку."
-            )
-            savings_block += (
-                f"\n🎯 Цель: {format_amount(goal_base, base)} ({progress:,.0f}%)"
-                f"\n💡 {tip}"
+        txs = result.scalars().all()
+
+        if not txs:
+            await message.answer("📭 В этом месяце транзакций нет.")
+            return
+
+        await message.answer("⏳ Формирую отчёт, подожди...")
+
+        expenses = [t for t in txs if t.type == TransactionType.expense]
+        incomes = [t for t in txs if t.type == TransactionType.income]
+
+        total_exp = sum(t.amount_rub for t in expenses)
+        total_inc = sum(t.amount_rub for t in incomes)
+        balance = total_inc - total_exp
+        base = (user.default_currency or "RUB").upper()
+        total_exp_base = await convert_from_rub(total_exp, base)
+        total_inc_base = await convert_from_rub(total_inc, base)
+        balance_base = await convert_from_rub(balance, base)
+
+        by_cat: dict[str, Decimal] = {}
+        for t in expenses:
+            by_cat[t.category] = by_cat.get(t.category, Decimal("0")) + t.amount_rub
+
+        month_label = start.strftime("%B %Y")
+
+        pie_bytes = build_pie_chart(by_cat, f"Расходы за {month_label}")
+        wf_bytes = build_waterfall_chart(total_inc, by_cat, month_label)
+
+        advice = ""
+        if user.goal:
+            sorted_cats = sorted(by_cat.items(), key=lambda x: -x[1])[:5]
+            advice = await generate_monthly_advice(
+                goal=user.goal,
+                month=month_label,
+                income=total_inc,
+                expenses=total_exp,
+                balance=balance,
+                categories=sorted_cats,
             )
 
-    text = (
-        f"📅 *{month_label}*\n\n"
-        f"💰 Доходы: *{format_amount(total_inc_base, base)}*\n"
-        f"💸 Расходы: *{format_amount(total_exp_base, base)}*\n"
-        f"📊 Баланс: *{sign}{format_amount(balance_base.copy_abs(), base)}*"
-    )
-    if advice:
-        text += f"\n\n🎯 *Советы по финансам:*\n{advice}"
-    text += f"{limits_block}{savings_block}"
-    await message.answer(text, parse_mode="Markdown")
+        if pie_bytes:
+            await message.answer_photo(
+                BufferedInputFile(pie_bytes, filename="pie.png"),
+                caption="🥧 Расходы по категориям",
+            )
+        if wf_bytes:
+            await message.answer_photo(
+                BufferedInputFile(wf_bytes, filename="waterfall.png"),
+                caption="📊 Доходы / расходы",
+            )
+
+        sign = "+" if balance >= 0 else "-"
+        limits_map = await _read_limits_map(session, user.telegram_id)
+        plan_lines: list[str] = []
+        if limits_map:
+            for cat, spent in sorted(by_cat.items(), key=lambda x: -x[1]):
+                plan = limits_map.get(cat, Decimal("0"))
+                if plan > 0:
+                    pct = (spent / plan * Decimal("100"))
+                    spent_base = await convert_from_rub(spent, base)
+                    plan_base = await convert_from_rub(plan, base)
+                    plan_lines.append(
+                        f"  • {cat}: {format_amount(spent_base, base)} / {format_amount(plan_base, base)} ({pct:,.0f}%)"
+                    )
+                else:
+                    spent_base = await convert_from_rub(spent, base)
+                    plan_lines.append(f"  • {cat}: {format_amount(spent_base, base)} / —")
+
+        limits_block = ""
+        if plan_lines:
+            limits_block = "\n\n📌 По категориям (факт vs план):\n" + "\n".join(plan_lines[:12])
+
+        total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, start)
+        savings_block = ""
+        if total_saved > 0 or user.savings_goal_amount_rub:
+            goal_name = user.savings_goal_name or "Копилка"
+            total_saved_base = await convert_from_rub(total_saved, base)
+            month_saved_base = await convert_from_rub(month_saved, base)
+            savings_block = (
+                f"\n\n🏦 {goal_name}: {format_amount(total_saved_base, base)}"
+                f"\n📈 За месяц в копилку: {format_amount(month_saved_base, base)}"
+            )
+            if user.savings_goal_amount_rub and user.savings_goal_amount_rub > 0:
+                remaining = max(Decimal("0"), user.savings_goal_amount_rub - total_saved)
+                progress = total_saved / user.savings_goal_amount_rub * Decimal("100")
+                goal_base = await convert_from_rub(user.savings_goal_amount_rub, base)
+                remaining_base = await convert_from_rub(remaining, base)
+                tip = (
+                    "Отличный темп, продолжай!" if remaining == 0 else
+                    f"Осталось {format_amount(remaining_base, base)}. Попробуй увеличить ежемесячный вклад в копилку."
+                )
+                savings_block += (
+                    f"\n🎯 Цель: {format_amount(goal_base, base)} ({progress:,.0f}%)"
+                    f"\n💡 {tip}"
+                )
+
+        text = (
+            f"📅 {month_label}\n\n"
+            f"💰 Доходы: {format_amount(total_inc_base, base)}\n"
+            f"💸 Расходы: {format_amount(total_exp_base, base)}\n"
+            f"📊 Баланс: {sign}{format_amount(balance_base.copy_abs(), base)}"
+        )
+        if advice:
+            text += f"\n\n🎯 Советы по финансам:\n{advice}"
+        text += f"{limits_block}{savings_block}"
+        await message.answer(text, parse_mode=None)
+    except Exception:
+        logger.exception("Failed to build monthly report user_id=%s", user.telegram_id)
+        await message.answer("Не получилось собрать месячный отчёт. Попробуй ещё раз через минуту.")
 
 
 @router.message(or_f(Command("stash"), F.text == "🏦 Копилка"))
