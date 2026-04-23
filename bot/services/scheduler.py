@@ -161,9 +161,11 @@ async def send_monthly_report(bot: Bot, user: User, session: AsyncSession) -> No
     # Waterfall chart
     wf_bytes = build_waterfall_chart(total_inc, by_cat_dec, month_label)
 
+    limits_map = await _read_limits_map(session, user.telegram_id)
     advice = ""
     if user.goal:
         sorted_cats = sorted(by_cat_dec.items(), key=lambda x: -x[1])[:5]
+        limits_for_llm = sorted(limits_map.items(), key=lambda x: x[0].lower()) if limits_map else []
         advice = await generate_monthly_advice(
             goal=user.goal,
             month=month_label,
@@ -171,10 +173,10 @@ async def send_monthly_report(bot: Bot, user: User, session: AsyncSession) -> No
             expenses=total_exp,
             balance=balance,
             categories=sorted_cats,
+            limits=limits_for_llm,
         )
 
     sign = "+" if balance >= 0 else ""
-    limits_map = await _read_limits_map(session, user.telegram_id)
     plan_lines: list[str] = []
     if limits_map:
         for cat, spent in sorted(by_cat_dec.items(), key=lambda x: -x[1]):
