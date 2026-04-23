@@ -55,8 +55,8 @@ async def send_daily_report(bot: Bot, user: User, session: AsyncSession) -> None
     expenses = [t for t in txs if t.type == TransactionType.expense]
     incomes = [t for t in txs if t.type == TransactionType.income]
 
-    total_exp = sum(t.amount_rub for t in expenses)
-    total_inc = sum(t.amount_rub for t in incomes)
+    total_exp = sum((t.amount_rub for t in expenses), Decimal("0"))
+    total_inc = sum((t.amount_rub for t in incomes), Decimal("0"))
 
     exp_by_cat: dict[str, float] = {}
     for t in expenses:
@@ -99,7 +99,7 @@ async def send_daily_report(bot: Bot, user: User, session: AsyncSession) -> None
         )
     )
     mtd_expenses = mtd_result.scalars().all()
-    mtd_total = sum(t.amount_rub for t in mtd_expenses)
+    mtd_total = sum((t.amount_rub for t in mtd_expenses), Decimal("0"))
     limits_map = await _read_limits_map(session, user.telegram_id)
     plan_total = sum(limits_map.values()) if limits_map else Decimal("0")
     if plan_total > 0:
@@ -144,8 +144,8 @@ async def send_monthly_report(bot: Bot, user: User, session: AsyncSession) -> No
     expenses = [t for t in txs if t.type == TransactionType.expense]
     incomes = [t for t in txs if t.type == TransactionType.income]
 
-    total_exp = sum(t.amount_rub for t in expenses)
-    total_inc = sum(t.amount_rub for t in incomes)
+    total_exp = sum((t.amount_rub for t in expenses), Decimal("0"))
+    total_inc = sum((t.amount_rub for t in incomes), Decimal("0"))
     balance = total_inc - total_exp
 
     by_cat: dict[str, float] = {}

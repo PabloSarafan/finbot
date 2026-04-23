@@ -148,7 +148,7 @@ async def _read_savings_stats(
         )
     )
     all_time = all_time_result.scalars().all()
-    total_saved = sum(t.amount_rub for t in all_time)
+    total_saved = sum((t.amount_rub for t in all_time), Decimal("0"))
 
     month_result = await session.execute(
         select(Transaction).where(
@@ -160,7 +160,7 @@ async def _read_savings_stats(
             )
         )
     )
-    month_saved = sum(t.amount_rub for t in month_result.scalars().all())
+    month_saved = sum((t.amount_rub for t in month_result.scalars().all()), Decimal("0"))
     return total_saved, month_saved
 
 
@@ -186,8 +186,8 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
         expenses = [t for t in txs if t.type == TransactionType.expense]
         incomes = [t for t in txs if t.type == TransactionType.income]
 
-        total_exp = sum(t.amount_rub for t in expenses)
-        total_inc = sum(t.amount_rub for t in incomes)
+        total_exp = sum((t.amount_rub for t in expenses), Decimal("0"))
+        total_inc = sum((t.amount_rub for t in incomes), Decimal("0"))
 
         exp_by_cat: dict[str, float] = {}
         for t in expenses:
@@ -238,7 +238,7 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
             )
         )
         mtd_expenses = mtd_result.scalars().all()
-        mtd_total = sum(t.amount_rub for t in mtd_expenses)
+        mtd_total = sum((t.amount_rub for t in mtd_expenses), Decimal("0"))
         limits_map = await _read_limits_map(session, user.telegram_id)
         plan_total = sum(limits_map.values()) if limits_map else Decimal("0")
         if plan_total > 0:
@@ -299,8 +299,8 @@ async def cmd_month(message: Message, session: AsyncSession, user: User = None) 
         expenses = [t for t in txs if t.type == TransactionType.expense]
         incomes = [t for t in txs if t.type == TransactionType.income]
 
-        total_exp = sum(t.amount_rub for t in expenses)
-        total_inc = sum(t.amount_rub for t in incomes)
+        total_exp = sum((t.amount_rub for t in expenses), Decimal("0"))
+        total_inc = sum((t.amount_rub for t in incomes), Decimal("0"))
         balance = total_inc - total_exp
         base = (user.default_currency or "RUB").upper()
         total_exp_base = await convert_from_rub(total_exp, base)
