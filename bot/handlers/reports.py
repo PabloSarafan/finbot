@@ -46,6 +46,7 @@ MONTHS_RU_GENITIVE = {
 
 class LimitsStates(StatesGroup):
     waiting_for_limits = State()
+    waiting_for_delete_limit = State()
 
 
 class SavingsStates(StatesGroup):
@@ -86,10 +87,29 @@ def _parse_limit_lines(text: str) -> list[tuple[str, Decimal]]:
 
 def _limits_skip_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="/skip")]],
+        keyboard=[[KeyboardButton(text="/skip"), KeyboardButton(text="🗑 Удалить лимит")]],
         resize_keyboard=True,
         one_time_keyboard=True,
         input_field_placeholder="Еда 30000, Кафе 15000",
+    )
+
+
+def _delete_limits_pick_kb(categories: list[str]) -> ReplyKeyboardMarkup:
+    rows: list[list[KeyboardButton]] = []
+    current: list[KeyboardButton] = []
+    for cat in categories:
+        current.append(KeyboardButton(text=cat))
+        if len(current) == 2:
+            rows.append(current)
+            current = []
+    if current:
+        rows.append(current)
+    rows.append([KeyboardButton(text="/skip")])
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Выбери категорию для удаления",
     )
 
 
@@ -574,34 +594,53 @@ async def process_limits(message: Message, session: AsyncSession, state: FSMCont
         await state.clear()
         await message.answer("✅ Вышел из режима настройки лимитов.", reply_markup=MAIN_KEYBOARD)
         return
+    if text == "🗑 Удалить лимит":
+        limits_map = await _read_limits_map(session, user.telegram_id)
+        if not limits_map:
+            await message.answer("Лимитов пока нет.", reply_markup=_limits_skip_kb())
+            return
+        await state.set_state(LimitsStates.waiting_for_delete_limit)
+        cats = sorted(limits_map.keys(), key=lambda x: x.lower())
+        await message.answer(
+            "Выбери категорию, лимит которой нужно удалить:",
+            reply_markup=_delete_limits_pick_kb(cats),
+        )
+        return
 
     parsed = _parse_limit_lines(text)
     if not parsed:
-        await state.clear()
         await message.answer(
-            "Похоже, это не формат лимитов. Вышел из режима лимитов — теперь можно снова вводить траты и доходы.",
-            reply_markup=MAIN_KEYBOARD,
+            "Не смог разобрать лимиты. Используй формат:\n`Еда 30000, Кафе 15000`\nили по одной строке.",
+            parse_mode="Markdown",
         )
         return
 
     base = (user.default_currency or "RUB").upper()
-    await session.execute(
-        delete(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
+    existing_result = await session.execute(
+        select(UserCategoryLimit).where(UserCategoryLimit.user_id == user.telegram_id)
     )
+    existing_limits = {x.category: x for x in existing_result.scalars().all()}
+    updated = 0
+    created = 0
     for cat, val in parsed:
         val_rub, _ = await convert_to_rub(val, base)
-        session.add(
-            UserCategoryLimit(
-                user_id=user.telegram_id,
-                category=cat,
-                monthly_limit_rub=val_rub,
+        existing = existing_limits.get(cat)
+        if existing:
+            existing.monthly_limit_rub = val_rub
+            updated += 1
+        else:
+            session.add(
+                UserCategoryLimit(
+                    user_id=user.telegram_id,
+                    category=cat,
+                    monthly_limit_rub=val_rub,
+                )
             )
-        )
+            created += 1
     await session.commit()
-    await state.clear()
     await message.answer(
-        f"✅ Сохранил лимиты: {len(parsed)} категорий.",
-        reply_markup=MAIN_KEYBOARD,
+        f"✅ Лимиты обновлены: {updated}, добавлены: {created}.",
+        reply_markup=_limits_skip_kb(),
     )
 
 
@@ -635,3 +674,33 @@ async def cb_limits_skip(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
     await callback.message.answer("✅ Вышел из режима настройки лимитов.", reply_markup=MAIN_KEYBOARD)
+
+
+@router.message(LimitsStates.waiting_for_delete_limit)
+async def process_delete_limit_pick(
+    message: Message, session: AsyncSession, state: FSMContext, user: User = None
+) -> None:
+    if user is None:
+        await state.clear()
+        return
+    text = message.text.strip()
+    if text.lower() == "/skip":
+        await state.set_state(LimitsStates.waiting_for_limits)
+        await message.answer("Ок, без удаления. Возвращаю в режим лимитов.", reply_markup=_limits_skip_kb())
+        return
+    result = await session.execute(
+        select(UserCategoryLimit).where(
+            and_(
+                UserCategoryLimit.user_id == user.telegram_id,
+                UserCategoryLimit.category == text,
+            )
+        )
+    )
+    item = result.scalar_one_or_none()
+    if item is None:
+        await message.answer("Не нашёл такой лимит. Выбери категорию из кнопок или /skip.")
+        return
+    await session.delete(item)
+    await session.commit()
+    await state.set_state(LimitsStates.waiting_for_limits)
+    await message.answer(f"✅ Лимит для категории `{text}` удалён.", parse_mode="Markdown", reply_markup=_limits_skip_kb())
