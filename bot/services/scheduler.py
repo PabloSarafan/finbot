@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -26,6 +26,16 @@ def _next_month_start(today: date) -> datetime:
     if today.month == 12:
         return datetime(today.year + 1, 1, 1, tzinfo=timezone.utc)
     return datetime(today.year, today.month + 1, 1, tzinfo=timezone.utc)
+
+
+def _week_bounds_msk(now_utc: datetime) -> tuple[datetime, datetime]:
+    # Week: Monday 00:00 .. Sunday 23:59 (MSK), represented in UTC.
+    msk_now = now_utc + timedelta(hours=3)
+    week_start_msk = datetime(msk_now.year, msk_now.month, msk_now.day) - timedelta(days=msk_now.weekday())
+    week_end_msk = week_start_msk + timedelta(days=7)
+    week_start_utc = week_start_msk - timedelta(hours=3)
+    week_end_utc = week_end_msk - timedelta(hours=3)
+    return week_start_utc.replace(tzinfo=timezone.utc), week_end_utc.replace(tzinfo=timezone.utc)
 
 
 async def _read_limits_map(session: AsyncSession, user_id: int) -> dict[str, Decimal]:
@@ -213,6 +223,55 @@ async def send_monthly_report(bot: Bot, user: User, session: AsyncSession) -> No
     await bot.send_message(user.telegram_id, summary, parse_mode="Markdown")
 
 
+async def send_weekly_report(bot: Bot, user: User, session: AsyncSession) -> None:
+    now_utc = datetime.now(timezone.utc)
+    week_start_utc, week_end_utc = _week_bounds_msk(now_utc)
+    result = await session.execute(
+        select(Transaction).where(
+            and_(
+                Transaction.user_id == user.telegram_id,
+                Transaction.created_at >= week_start_utc,
+                Transaction.created_at < week_end_utc,
+            )
+        )
+    )
+    txs = result.scalars().all()
+    if not txs:
+        await bot.send_message(user.telegram_id, "📭 За неделю транзакций нет.")
+        return
+
+    expenses = [t for t in txs if t.type == TransactionType.expense]
+    incomes = [t for t in txs if t.type == TransactionType.income]
+    total_exp = sum((t.amount_rub for t in expenses), Decimal("0"))
+    total_inc = sum((t.amount_rub for t in incomes), Decimal("0"))
+    diff = total_inc - total_exp
+    sign = "+" if diff >= 0 else "-"
+
+    exp_by_cat: dict[str, Decimal] = {}
+    for t in expenses:
+        exp_by_cat[t.category] = exp_by_cat.get(t.category, Decimal("0")) + t.amount_rub
+
+    limits_map = await _read_limits_map(session, user.telegram_id)
+    lines = ["📅 *Недельный отчёт (пн-вс, МСК)*"]
+    if total_exp > 0:
+        lines.append(f"💸 Расходы за неделю: *{total_exp:,.0f} ₽*")
+        cat_lines: list[str] = []
+        for cat, spent in sorted(exp_by_cat.items(), key=lambda x: -x[1]):
+            plan = limits_map.get(cat, Decimal("0"))
+            if plan > 0:
+                pct = spent / plan * Decimal("100")
+                cat_lines.append(f"  • {cat}: {spent:,.0f} ₽ / {plan:,.0f} ₽ ({pct:,.0f}%)")
+            else:
+                cat_lines.append(f"  • {cat}: {spent:,.0f} ₽")
+        if cat_lines:
+            lines.append("📌 По категориям:\n" + "\n".join(cat_lines[:12]))
+    if total_inc > 0:
+        lines.append(f"💰 Доходы за неделю: *{total_inc:,.0f} ₽*")
+    if total_exp > 0 or total_inc > 0:
+        lines.append(f"📊 Итого (доходы - расходы): *{sign}{abs(diff):,.0f} ₽*")
+    await bot.send_message(user.telegram_id, "\n\n".join(lines), parse_mode="Markdown")
+
+
 async def _run_daily_reports(bot: Bot) -> None:
     async with AsyncSessionFactory() as session:
         result = await session.execute(select(User).where(User.is_active == True))
@@ -235,6 +294,17 @@ async def _run_monthly_reports(bot: Bot) -> None:
                 logger.error(f"Monthly report failed for {user.telegram_id}: {e}")
 
 
+async def _run_weekly_reports(bot: Bot) -> None:
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(select(User).where(User.is_active == True))
+        users = result.scalars().all()
+        for user in users:
+            try:
+                await send_weekly_report(bot, user, session)
+            except Exception as e:
+                logger.error(f"Weekly report failed for {user.telegram_id}: {e}")
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -253,6 +323,15 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         CronTrigger(day=1, hour=9, minute=0),
         args=[bot],
         id="monthly_report",
+        replace_existing=True,
+    )
+
+    # Weekly report: Sunday 23:59 MSK => Sunday 20:59 UTC
+    scheduler.add_job(
+        _run_weekly_reports,
+        CronTrigger(day_of_week="sun", hour=20, minute=59),
+        args=[bot],
+        id="weekly_report",
         replace_existing=True,
     )
 
