@@ -1,6 +1,7 @@
 import uuid
 import logging
 import time
+import re
 from decimal import Decimal
 from typing import List, Optional
 
@@ -40,6 +41,40 @@ def _category_pool_for_user(user: Optional[User], tx_type: str) -> List[str]:
                 return pool + [SAVINGS_CATEGORY]
             return pool
     return CATEGORIES_EXPENSE if tx_type == "expense" else (CATEGORIES_INCOME + [SAVINGS_CATEGORY])
+
+
+def _currency_from_text(raw: str) -> str:
+    s = raw.strip().lower()
+    if s in ("", "руб", "руб.", "rur", "rub", "₽"):
+        return "RUB"
+    if s in ("usd", "$", "доллар", "доллары"):
+        return "USD"
+    if s in ("eur", "€", "евро"):
+        return "EUR"
+    if s in ("uzs", "сум", "сумов", "сумы"):
+        return "UZS"
+    return raw.strip().upper()
+
+
+def _parse_savings_shortcut(text: str) -> Optional[dict]:
+    m = re.match(
+        r"^\s*копилка\b[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)\s*([A-Za-zА-Яа-я$€₽]*)\s*$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+    amount = Decimal(m.group(1).replace(",", "."))
+    if amount <= 0:
+        return None
+    currency = _currency_from_text(m.group(2))
+    return {
+        "amount": amount,
+        "currency": currency or "RUB",
+        "type": "income",
+        "category": SAVINGS_CATEGORY,
+        "description": "Копилка",
+    }
 
 
 class CategoryEditState(StatesGroup):
@@ -180,11 +215,13 @@ async def handle_transaction(
 
     for item in items:
         t0 = time.perf_counter()
-        parsed = await parse_transaction(
-            item,
-            custom_for_llm,
-            default_currency=user.default_currency,
-        )
+        parsed = _parse_savings_shortcut(item)
+        if parsed is None:
+            parsed = await parse_transaction(
+                item,
+                custom_for_llm,
+                default_currency=user.default_currency,
+            )
         llm_ms = int((time.perf_counter() - t0) * 1000)
         logger.info("LLM parse duration user_id=%s ms=%s item='%s'", user.telegram_id, llm_ms, item)
         if parsed is None:

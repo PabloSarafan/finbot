@@ -227,7 +227,7 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
                 inc_block += f"\n{inc_lines}"
             parts.append(inc_block)
 
-        # Month-to-date expenses vs configured monthly budget
+        # Month-to-date expenses vs configured monthly budget + by-category breakdown.
         mtd_result = await session.execute(
             select(Transaction).where(
                 and_(
@@ -239,16 +239,36 @@ async def cmd_report(message: Message, session: AsyncSession, user: User = None)
         )
         mtd_expenses = mtd_result.scalars().all()
         mtd_total = sum((t.amount_rub for t in mtd_expenses), Decimal("0"))
+        mtd_by_cat: dict[str, Decimal] = {}
+        for t in mtd_expenses:
+            mtd_by_cat[t.category] = mtd_by_cat.get(t.category, Decimal("0")) + t.amount_rub
         limits_map = await _read_limits_map(session, user.telegram_id)
         plan_total = sum(limits_map.values()) if limits_map else Decimal("0")
+        mtd_total_base = await convert_from_rub(mtd_total, base)
         if plan_total > 0:
             pct = (mtd_total / plan_total * Decimal("100"))
-            mtd_total_base = await convert_from_rub(mtd_total, base)
             plan_total_base = await convert_from_rub(plan_total, base)
             parts.append(
                 f"📅 Траты за месяц (на сегодня): {format_amount(mtd_total_base, base)} / "
                 f"{format_amount(plan_total_base, base)} ({pct:,.0f}%)"
             )
+        elif mtd_total > 0:
+            parts.append(f"📅 Траты за месяц (на сегодня): {format_amount(mtd_total_base, base)}")
+
+        if mtd_by_cat:
+            month_cat_lines: list[str] = []
+            for cat, spent in sorted(mtd_by_cat.items(), key=lambda x: -x[1]):
+                spent_base = await convert_from_rub(spent, base)
+                plan = limits_map.get(cat, Decimal("0"))
+                if plan > 0:
+                    plan_base = await convert_from_rub(plan, base)
+                    pct = spent / plan * Decimal("100")
+                    month_cat_lines.append(
+                        f"  • {cat}: {format_amount(spent_base, base)} / {format_amount(plan_base, base)} ({pct:,.0f}%)"
+                    )
+                else:
+                    month_cat_lines.append(f"  • {cat}: {format_amount(spent_base, base)}")
+            parts.append("📌 За месяц по категориям:\n" + "\n".join(month_cat_lines[:12]))
 
         total_saved, month_saved = await _read_savings_stats(session, user.telegram_id, month_start)
         if total_saved > 0 or user.savings_goal_amount_rub:
@@ -435,6 +455,25 @@ async def process_stash_goal(message: Message, session: AsyncSession, state: FSM
         await state.clear()
         return
     text = message.text.strip()
+
+    # Allow main menu actions while stash goal state is active.
+    if text in ("📌 Лимиты", "/limits"):
+        await state.clear()
+        await cmd_limits(message, session, state, user)
+        return
+    if text in ("📊 Отчёт за сегодня", "/report"):
+        await state.clear()
+        await cmd_report(message, session, user)
+        return
+    if text in ("📅 Месячный отчёт", "/month"):
+        await state.clear()
+        await cmd_month(message, session, user)
+        return
+    if text in ("🎯 Изменить цель", "/goal"):
+        await state.clear()
+        await message.answer("Режим копилки закрыт. Обнови цель через /goal.")
+        return
+
     if text.lower() == "/skip":
         user.savings_goal_name = None
         user.savings_goal_amount_rub = None
@@ -479,6 +518,32 @@ async def cmd_limits(message: Message, session: AsyncSession, state: FSMContext,
         for cat, val in sorted(limits_map.items(), key=lambda x: x[0].lower()):
             val_base = await convert_from_rub(val, base)
             lines.append(f"• {cat} — {format_amount(val_base, base)}")
+
+        today = date.today()
+        start = _month_start(today)
+        mtd_result = await session.execute(
+            select(Transaction).where(
+                and_(
+                    Transaction.user_id == user.telegram_id,
+                    Transaction.type == TransactionType.expense,
+                    Transaction.created_at >= start,
+                )
+            )
+        )
+        mtd_expenses = mtd_result.scalars().all()
+        spent_by_cat: dict[str, Decimal] = {}
+        for tx in mtd_expenses:
+            spent_by_cat[tx.category] = spent_by_cat.get(tx.category, Decimal("0")) + tx.amount_rub
+
+        lines.extend(["", "Факт / лимит за текущий месяц:"])
+        for cat, limit_rub in sorted(limits_map.items(), key=lambda x: x[0].lower()):
+            spent_rub = spent_by_cat.get(cat, Decimal("0"))
+            spent_base = await convert_from_rub(spent_rub, base)
+            limit_base = await convert_from_rub(limit_rub, base)
+            pct = (spent_rub / limit_rub * Decimal("100")) if limit_rub > 0 else Decimal("0")
+            lines.append(
+                f"• {cat}: {format_amount(spent_base, base)} / {format_amount(limit_base, base)} ({pct:,.0f}%)"
+            )
     await state.set_state(LimitsStates.waiting_for_limits)
     await message.answer(
         "\n".join(lines),
@@ -512,9 +577,10 @@ async def process_limits(message: Message, session: AsyncSession, state: FSMCont
 
     parsed = _parse_limit_lines(text)
     if not parsed:
+        await state.clear()
         await message.answer(
-            "Не смог разобрать лимиты. Используй формат:\n`Еда 30000, Кафе 15000`\nили по одной строке.",
-            parse_mode="Markdown",
+            "Похоже, это не формат лимитов. Вышел из режима лимитов — теперь можно снова вводить траты и доходы.",
+            reply_markup=MAIN_KEYBOARD,
         )
         return
 
