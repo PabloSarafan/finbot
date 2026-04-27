@@ -29,7 +29,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Отчёт за сегодня"), KeyboardButton(text="📅 Месячный отчёт")],
         [KeyboardButton(text="🏦 Копилка"), KeyboardButton(text="📌 Лимиты")],
-        [KeyboardButton(text="🎯 Изменить цель")],
+        [KeyboardButton(text="📝 Последние 10"), KeyboardButton(text="🎯 Изменить цель")],
     ],
     resize_keyboard=True,
     input_field_placeholder="Напиши трату или доход...",
