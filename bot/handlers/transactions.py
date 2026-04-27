@@ -159,6 +159,7 @@ def _tx_fields_kb(tx_id: uuid.UUID) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Категория", callback_data=f"txe:field:category:{c}"),
             ],
             [InlineKeyboardButton(text="Описание", callback_data=f"txe:field:description:{c}")],
+            [InlineKeyboardButton(text="🗑 Удалить запись", callback_data=f"txe:delete:{c}")],
         ]
     )
 
@@ -177,8 +178,8 @@ def _tx_type_kb(tx_id: uuid.UUID) -> InlineKeyboardMarkup:
 
 
 def _normalize_currency(text: str) -> str:
-    code = text.strip().upper()
-    if len(code) != 3 or not code.isalpha():
+    code = _currency_from_text(text)
+    if len(code) != 3 or not code.isascii() or not code.isalpha():
         raise ValueError("Нужен 3-буквенный код валюты, например RUB или USD.")
     return code
 
@@ -306,6 +307,24 @@ async def cb_set_type(callback: CallbackQuery, session: AsyncSession) -> None:
         parse_mode="Markdown",
         reply_markup=_tx_fields_kb(tx.id),
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("txe:delete:"))
+async def cb_delete_tx(callback: CallbackQuery, session: AsyncSession, state: FSMContext) -> None:
+    cid = callback.data[11:]
+    tx_id = _expand(cid)
+    result = await session.execute(select(Transaction).where(Transaction.id == tx_id))
+    tx = result.scalar_one_or_none()
+    if tx is None or tx.user_id != callback.from_user.id:
+        await callback.answer("Запись не найдена.", show_alert=True)
+        return
+
+    await session.delete(tx)
+    await session.commit()
+    await state.clear()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("✅ Запись удалена.")
     await callback.answer()
 
 
