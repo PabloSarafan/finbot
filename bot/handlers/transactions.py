@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from aiogram import Router, F
+from aiogram.filters import Command, or_f
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -13,7 +14,7 @@ from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
-from sqlalchemy import select
+from sqlalchemy import select, desc, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import Transaction, TransactionType, User, UserCategoryMapping
@@ -81,6 +82,10 @@ class CategoryEditState(StatesGroup):
     waiting_for_custom = State()
 
 
+class TransactionEditState(StatesGroup):
+    waiting_for_value = State()
+
+
 def _compact(tx_id: uuid.UUID) -> str:
     return tx_id.hex  # 32 chars
 
@@ -119,6 +124,248 @@ def _save_rule_kb(tx_id: uuid.UUID) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="Да, запомнить", callback_data=f"cat:sy:{c}"),
         InlineKeyboardButton(text="Нет", callback_data=f"cat:sn:{c}"),
     ]])
+
+
+def _tx_preview(text: str, limit: int = 18) -> str:
+    value = (text or "").strip().replace("\n", " ")
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
+
+
+def _tx_pick_kb(items: list[Transaction]) -> InlineKeyboardMarkup:
+    rows = []
+    for idx, tx in enumerate(items, start=1):
+        icon = "💸" if tx.type == TransactionType.expense else "💰"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"✏️ {idx}. {icon} {_tx_preview(tx.description)}",
+                callback_data=f"txe:pick:{_compact(tx.id)}",
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _tx_fields_kb(tx_id: uuid.UUID) -> InlineKeyboardMarkup:
+    c = _compact(tx_id)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Тип", callback_data=f"txe:field:type:{c}"),
+                InlineKeyboardButton(text="Сумма", callback_data=f"txe:field:amount:{c}"),
+            ],
+            [
+                InlineKeyboardButton(text="Валюта", callback_data=f"txe:field:currency:{c}"),
+                InlineKeyboardButton(text="Категория", callback_data=f"txe:field:category:{c}"),
+            ],
+            [InlineKeyboardButton(text="Описание", callback_data=f"txe:field:description:{c}")],
+        ]
+    )
+
+
+def _tx_type_kb(tx_id: uuid.UUID) -> InlineKeyboardMarkup:
+    c = _compact(tx_id)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💸 Расход", callback_data=f"txe:type:expense:{c}"),
+                InlineKeyboardButton(text="💰 Доход", callback_data=f"txe:type:income:{c}"),
+            ],
+            [InlineKeyboardButton(text="↩️ Назад к полям", callback_data=f"txe:pick:{c}")],
+        ]
+    )
+
+
+def _normalize_currency(text: str) -> str:
+    code = text.strip().upper()
+    if len(code) != 3 or not code.isalpha():
+        raise ValueError("Нужен 3-буквенный код валюты, например RUB или USD.")
+    return code
+
+
+async def _recompute_rub_fields(tx: Transaction) -> None:
+    amount_rub, exchange_rate = await convert_to_rub(tx.amount_original, tx.currency_original)
+    tx.amount_rub = amount_rub
+    tx.exchange_rate = exchange_rate
+
+
+async def _tx_edit_text(tx: Transaction, user: Optional[User]) -> str:
+    created = tx.created_at.strftime("%d.%m %H:%M") if tx.created_at else "—"
+    icon = "💸" if tx.type == TransactionType.expense else "💰"
+    base_currency = ((user.default_currency if user else "RUB") or "RUB").upper()
+    original = format_amount(tx.amount_original, tx.currency_original)
+    if base_currency == tx.currency_original:
+        amount_line = original
+    else:
+        base_amount = await convert_from_rub(tx.amount_rub, base_currency)
+        amount_line = f"{original} (~{format_amount(base_amount, base_currency)})"
+    return (
+        f"✏️ Редактирование записи\n"
+        f"Дата: {created}\n"
+        f"Тип: {icon} `{tx.type.value}`\n"
+        f"Категория: *{tx.category}*\n"
+        f"Описание: {tx.description}\n"
+        f"Сумма: {amount_line}"
+    )
+
+
+@router.message(or_f(Command("last10"), F.text == "📝 Последние 10"))
+async def cmd_last10(message: Message, session: AsyncSession, user: User = None) -> None:
+    if user is None:
+        return
+    result = await session.execute(
+        select(Transaction)
+        .where(Transaction.user_id == user.telegram_id)
+        .order_by(desc(Transaction.created_at))
+        .limit(10)
+    )
+    items = result.scalars().all()
+    if not items:
+        await message.answer("Пока нет сохранённых операций.")
+        return
+
+    lines = ["🧾 Последние 10 операций:"]
+    for idx, tx in enumerate(items, start=1):
+        icon = "💸" if tx.type == TransactionType.expense else "💰"
+        created = tx.created_at.strftime("%d.%m %H:%M") if tx.created_at else "—"
+        lines.append(
+            f"{idx}. {icon} {created} — {format_amount(tx.amount_original, tx.currency_original)} | "
+            f"{tx.category} | {_tx_preview(tx.description, 28)}"
+        )
+    await message.answer(
+        "\n".join(lines) + "\n\nВыбери запись для редактирования:",
+        reply_markup=_tx_pick_kb(items),
+    )
+
+
+@router.callback_query(F.data.startswith("txe:pick:"))
+async def cb_pick_tx(callback: CallbackQuery, session: AsyncSession) -> None:
+    cid = callback.data[9:]
+    tx_id = _expand(cid)
+    result = await session.execute(select(Transaction).where(Transaction.id == tx_id))
+    tx = result.scalar_one_or_none()
+    if tx is None or tx.user_id != callback.from_user.id:
+        await callback.answer("Запись не найдена.", show_alert=True)
+        return
+    user_result = await session.execute(select(User).where(User.telegram_id == tx.user_id))
+    user = user_result.scalar_one_or_none()
+    await callback.message.answer(
+        await _tx_edit_text(tx, user),
+        parse_mode="Markdown",
+        reply_markup=_tx_fields_kb(tx.id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^txe:field:(type|amount|currency|category|description):"))
+async def cb_pick_field(callback: CallbackQuery, session: AsyncSession, state: FSMContext) -> None:
+    _, _, field, cid = callback.data.split(":", 3)
+    tx_id = _expand(cid)
+    result = await session.execute(select(Transaction).where(Transaction.id == tx_id))
+    tx = result.scalar_one_or_none()
+    if tx is None or tx.user_id != callback.from_user.id:
+        await callback.answer("Запись не найдена.", show_alert=True)
+        return
+
+    if field == "type":
+        await callback.message.answer("Выбери новый тип операции:", reply_markup=_tx_type_kb(tx_id))
+        await callback.answer()
+        return
+
+    await state.set_state(TransactionEditState.waiting_for_value)
+    await state.update_data(edit_tx_id=cid, edit_field=field)
+    prompts = {
+        "amount": "Введи новую сумму (например: `2500` или `2500.50`).",
+        "currency": "Введи новую валюту (3 буквы, например: `RUB`, `USD`, `EUR`).",
+        "category": "Введи новую категорию текстом.",
+        "description": "Введи новое описание операции.",
+    }
+    await callback.message.answer(prompts[field], parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("txe:type:"))
+async def cb_set_type(callback: CallbackQuery, session: AsyncSession) -> None:
+    _, _, value, cid = callback.data.split(":", 3)
+    if value not in ("income", "expense"):
+        await callback.answer("Неверный тип.", show_alert=True)
+        return
+    tx_id = _expand(cid)
+    result = await session.execute(select(Transaction).where(Transaction.id == tx_id))
+    tx = result.scalar_one_or_none()
+    if tx is None or tx.user_id != callback.from_user.id:
+        await callback.answer("Запись не найдена.", show_alert=True)
+        return
+    tx.type = TransactionType(value)
+    await session.commit()
+
+    user_result = await session.execute(select(User).where(User.telegram_id == tx.user_id))
+    user = user_result.scalar_one_or_none()
+    await callback.message.answer(
+        "✅ Тип обновлён.\n\n" + await _tx_edit_text(tx, user),
+        parse_mode="Markdown",
+        reply_markup=_tx_fields_kb(tx.id),
+    )
+    await callback.answer()
+
+
+@router.message(TransactionEditState.waiting_for_value)
+async def process_edit_value(
+    message: Message, session: AsyncSession, state: FSMContext, user: User = None
+) -> None:
+    if user is None:
+        await state.clear()
+        return
+    data = await state.get_data()
+    cid = data.get("edit_tx_id")
+    field = data.get("edit_field")
+    if not cid or field not in ("amount", "currency", "category", "description"):
+        await state.clear()
+        await message.answer("Сессия редактирования устарела. Вызови /last10 снова.")
+        return
+
+    tx_id = _expand(cid)
+    result = await session.execute(
+        select(Transaction).where(
+            and_(Transaction.id == tx_id, Transaction.user_id == user.telegram_id)
+        )
+    )
+    tx = result.scalar_one_or_none()
+    if tx is None:
+        await state.clear()
+        await message.answer("Запись не найдена. Вызови /last10 снова.")
+        return
+
+    value = message.text.strip()
+    try:
+        if field == "amount":
+            amount = Decimal(value.replace(",", "."))
+            if amount <= 0:
+                raise ValueError("Сумма должна быть больше 0.")
+            tx.amount_original = amount
+            await _recompute_rub_fields(tx)
+        elif field == "currency":
+            tx.currency_original = _normalize_currency(value)
+            await _recompute_rub_fields(tx)
+        elif field == "category":
+            if not value:
+                raise ValueError("Категория не может быть пустой.")
+            tx.category = value
+        elif field == "description":
+            if not value:
+                raise ValueError("Описание не может быть пустым.")
+            tx.description = value
+        await session.commit()
+    except Exception as e:
+        await message.answer(f"Не удалось обновить поле: {e}")
+        return
+
+    await state.clear()
+    await message.answer(
+        "✅ Запись обновлена.\n\n" + await _tx_edit_text(tx, user),
+        parse_mode="Markdown",
+        reply_markup=_tx_fields_kb(tx.id),
+    )
 
 
 async def _custom_category(session: AsyncSession, user_id: int, description: str) -> Optional[str]:
