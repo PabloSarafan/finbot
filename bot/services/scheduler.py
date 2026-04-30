@@ -85,19 +85,17 @@ async def send_daily_report(bot: Bot, user: User, session: AsyncSession) -> None
         for cat, amt in sorted(inc_by_cat.items(), key=lambda x: -x[1])
     )
 
-    balance = total_inc - total_exp
-    sign = "+" if balance >= 0 else ""
-
-    text = (
-        f"📊 *Итог за {today.strftime('%d %B')}*\n\n"
-        f"💸 Расходы: *{total_exp:,.0f} ₽*"
-    )
-    if exp_lines:
-        text += f"\n{exp_lines}"
-    text += f"\n\n💰 Доходы: *{total_inc:,.0f} ₽*"
-    if inc_lines:
-        text += f"\n{inc_lines}"
-    text += f"\n\n📈 Баланс дня: *{sign}{balance:,.0f} ₽*"
+    text = f"📊 *Итог за {today.strftime('%d %B')}*"
+    if total_exp > 0:
+        text += f"\n\n💸 Расходы: *{total_exp:,.0f} ₽*"
+        if exp_lines:
+            text += f"\n{exp_lines}"
+    if total_inc > 0:
+        text += f"\n\n💰 Доходы: *{total_inc:,.0f} ₽*"
+        if inc_lines:
+            text += f"\n{inc_lines}"
+    if total_exp == 0 and total_inc == 0:
+        text += "\n\n📭 Сегодня транзакций нет."
     mtd_result = await session.execute(
         select(Transaction)
         .where(
