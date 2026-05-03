@@ -78,6 +78,128 @@ def _parse_savings_shortcut(text: str) -> Optional[dict]:
     }
 
 
+def _is_currency_tail_token(raw: str) -> bool:
+    """True if trailing word after amount is a currency marker (not arbitrary text)."""
+    if not raw.strip():
+        return True
+    s = raw.strip().lower()
+    if s in (
+        "руб", "руб.", "р.", "rur", "rub", "₽",
+        "usd", "$", "доллар", "доллары",
+        "eur", "€", "евро",
+        "uzs", "сум", "сумов", "сумы",
+        "kzt", "₸", "тенге",
+        "gbp", "£", "фунт",
+        "cny", "¥", "юань",
+    ):
+        return True
+    t = raw.strip()
+    return len(t) == 3 and t.isalpha() and t.encode().isascii()
+
+
+def _resolve_currency_tail(raw: str, default_currency: Optional[str]) -> str:
+    base = (default_currency or "RUB").upper()
+    if not raw.strip():
+        return base
+    if not _is_currency_tail_token(raw):
+        return base
+    code = _currency_from_text(raw).upper()
+    if len(code) == 3 and code.encode().isascii() and code.isalpha():
+        return code
+    return base
+
+
+def _guess_tx_type_from_description(desc: str) -> str:
+    low = desc.lower().strip()
+    income_markers = (
+        "зарплата",
+        "аванс",
+        "премия",
+        "доход",
+        "получил",
+        "получила",
+        "перевели",
+        "перевод",
+        "возврат",
+        "кэшбэк",
+        "кешбэк",
+        "фриланс",
+        "инвест",
+        "дивиденд",
+        "проценты",
+    )
+    for m in income_markers:
+        if low.startswith(m) or f" {m}" in low:
+            return "income"
+    return "expense"
+
+
+def _guess_category_simple(desc: str, user: User, tx_type: str) -> str:
+    pool = _category_pool_for_user(user, tx_type)
+    if not pool:
+        return "Прочее 📦" if tx_type == "expense" else "Прочее доход 💰"
+    d = desc.lower()
+    d_tokens = [w for w in re.findall(r"[a-zа-яё0-9]+", d) if len(w) >= 2]
+    best: Optional[str] = None
+    best_score = 0
+    for c in pool:
+        cl = c.lower()
+        score = 0
+        for w in d_tokens:
+            if len(w) >= 3 and w in cl:
+                score += 3
+            elif len(w) >= 2 and w in cl:
+                score += 1
+        for w in re.findall(r"[a-zа-яё]+", cl):
+            if len(w) >= 3 and w in d:
+                score += 2
+        if score > best_score:
+            best_score = score
+            best = c
+    if best is not None and best_score > 0:
+        return best
+    for c in pool:
+        lowc = c.lower()
+        if "прочее" in lowc or "разное" in lowc:
+            return c
+    return pool[0]
+
+
+def _parse_simple_money_line(text: str, user: User) -> Optional[dict]:
+    """
+    Fallback parser for lines like 'Самса 48000 сум' or 'кофе 200 руб' when the LLM returns nothing.
+    Expects a numeric amount at the end of the string, optional currency token.
+    """
+    text = text.strip()
+    if not text or len(text) < 3:
+        return None
+    m = re.search(r"([0-9]+(?:[.,][0-9]+)?)\s*([A-Za-zА-Яа-яЁё$€₽]{0,14})?\s*$", text)
+    if not m:
+        return None
+    desc = text[: m.start()].strip()
+    if not desc:
+        return None
+    try:
+        amount = Decimal(m.group(1).replace(",", "."))
+    except Exception:
+        return None
+    if amount <= 0:
+        return None
+    curr_raw = (m.group(2) or "").strip()
+    if curr_raw and not _is_currency_tail_token(curr_raw):
+        return None
+    currency = _resolve_currency_tail(curr_raw, user.default_currency)
+    tx_type = _guess_tx_type_from_description(desc)
+    category = _guess_category_simple(desc, user, tx_type)
+    return {
+        "amount": amount,
+        "currency": currency,
+        "type": tx_type,
+        "category": category,
+        "description": desc[:500],
+    }
+
+
 class CategoryEditState(StatesGroup):
     waiting_for_custom = State()
 
@@ -488,6 +610,14 @@ async def handle_transaction(
                 custom_for_llm,
                 default_currency=user.default_currency,
             )
+        if parsed is None:
+            parsed = _parse_simple_money_line(item, user)
+            if parsed is not None:
+                logger.info(
+                    "Transaction parsed via simple money line user_id=%s item='%s'",
+                    user.telegram_id,
+                    item,
+                )
         llm_ms = int((time.perf_counter() - t0) * 1000)
         logger.info("LLM parse duration user_id=%s ms=%s item='%s'", user.telegram_id, llm_ms, item)
         if parsed is None:

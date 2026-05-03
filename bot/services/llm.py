@@ -10,6 +10,26 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _extract_json_object(raw: str) -> str:
+    """
+    Model output sometimes includes markdown fences or extra prose.
+    Return the substring from the first '{' to the last '}' inclusive.
+    """
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        lines = s.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+    start = s.find("{")
+    end = s.rfind("}")
+    if start >= 0 and end > start:
+        return s[start : end + 1]
+    return s
+
 client_kwargs = {"api_key": settings.openai_api_key}
 if settings.openai_base_url:
     client_kwargs["base_url"] = settings.openai_base_url
@@ -114,23 +134,35 @@ async def parse_transaction(
             f"\nДополнительное правило: если валюта не указана явно, используй {base_currency}."
         )
 
-    try:
-        response = await client.chat.completions.create(
-            model=settings.openai_model_categorize,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0,
-            max_tokens=150,
-        )
-    except Exception:
-        logger.exception("LLM categorize request failed")
-        return None
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    response = None
+    for use_json_object in (True, False):
+        try:
+            kwargs = dict(
+                model=settings.openai_model_categorize,
+                messages=messages,
+                temperature=0,
+                max_tokens=150,
+            )
+            if use_json_object:
+                kwargs["response_format"] = {"type": "json_object"}
+            response = await client.chat.completions.create(**kwargs)
+            break
+        except Exception:
+            if use_json_object:
+                logger.warning(
+                    "LLM categorize JSON mode failed; retrying without response_format"
+                )
+                continue
+            logger.exception("LLM categorize request failed")
+            return None
 
     content = (response.choices[0].message.content or "").strip()
     try:
-        data = json.loads(content)
+        data = json.loads(_extract_json_object(content))
         # Validate required fields
         required = {"amount", "currency", "type", "category", "description"}
         if not required.issubset(data.keys()):
@@ -143,7 +175,10 @@ async def parse_transaction(
             data["category"] = _normalize_category_to_allowed(str(data.get("category", "")), allowed)
         return data
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-        logger.exception("Failed to parse transaction JSON from model")
+        logger.warning(
+            "Failed to parse transaction JSON from model; snippet=%r",
+            content[:400],
+        )
         return None
 
 
