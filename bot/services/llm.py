@@ -160,6 +160,10 @@ async def parse_transaction(
             logger.exception("LLM categorize request failed")
             return None
 
+    if response is None or not response.choices:
+        logger.warning("LLM categorize returned empty response")
+        return None
+
     content = (response.choices[0].message.content or "").strip()
     try:
         data = json.loads(_extract_json_object(content))

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     openai_https_proxy: Optional[str] = None
     openai_model_categorize: str = "gpt-4o-mini"
     openai_model_report: str = "gpt-4o"
-    llm_strict_startup_check: bool = True
+    llm_strict_startup_check: bool = False
     run_migrations_on_startup: bool = True
 
     # Database

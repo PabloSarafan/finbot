@@ -26,11 +26,31 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot) -> None:
-    # Optional fail-fast check: can be disabled for restricted regions.
+    # Polling and webhooks are mutually exclusive in Telegram.
+    await bot.delete_webhook(drop_pending_updates=True)
+    me = await bot.get_me()
+    logger.info("Telegram authorized as @%s (id=%s)", me.username, me.id)
+
+    logger.info(
+        "Startup config: migrations=%s llm_strict_check=%s openai_proxy=%s",
+        settings.run_migrations_on_startup,
+        settings.llm_strict_startup_check,
+        bool(settings.openai_https_proxy),
+    )
+
     if settings.llm_strict_startup_check:
         await assert_llm_ready()
+        logger.info("LLM startup check passed")
     else:
-        logger.warning("LLM startup check is disabled (LLM_STRICT_STARTUP_CHECK=false)")
+        try:
+            await assert_llm_ready()
+            logger.info("LLM startup check passed")
+        except Exception:
+            logger.warning(
+                "LLM is not reachable at startup; bot will run, "
+                "but categorization may fail until OPENAI_HTTPS_PROXY/API is fixed"
+            )
+
     logger.info("Bot started")
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать / перезапустить"),
