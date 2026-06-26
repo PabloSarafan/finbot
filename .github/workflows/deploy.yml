@@ -28,15 +28,32 @@ jobs:
       - name: Run database migrations
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          DB_CONNECT_TIMEOUT_SEC: 30
+          DB_COMMAND_TIMEOUT_SEC: 120
         run: |
           if [ -z "$DATABASE_URL" ]; then
             echo "PROD_DATABASE_URL secret is not set"
             exit 1
           fi
-          alembic upgrade head
+          attempts=5
+          delay=10
+          for attempt in $(seq 1 "$attempts"); do
+            echo "Migration attempt ${attempt}/${attempts}..."
+            if alembic upgrade head; then
+              echo "Migrations applied successfully"
+              exit 0
+            fi
+            if [ "$attempt" -lt "$attempts" ]; then
+              echo "Migration failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          echo "Migrations failed after ${attempts} attempts (deploy will continue; app migrates on startup)"
+          exit 1
 
   deploy:
     needs: migrate
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
